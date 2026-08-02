@@ -980,6 +980,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
         const jobs = await rpc("claim_integration_jobs", {
           p_destination: "conta_azul",
           p_batch_size: 1,
+          p_source_platform: "zouti",
         }) as ClaimedJob[];
         const job = jobs[0];
         if (!job) break;

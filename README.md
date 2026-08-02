@@ -164,6 +164,19 @@ Assim, um ACK perdido não transforma o mesmo pedido em outra venda. A cadência
 serial para respeitar o limite oficial da Conta Azul de 10 requisições/s e
 600/min por conta ERP.
 
+### `POST /functions/v1/human-os-worker`
+
+Worker protegido pelo mesmo segredo administrativo. Ele descriptografa o
+envelope salvo, reconstrói exatamente os bytes originais do body e os envia ao
+webhook configurado em `HUMAN_OS_WEBHOOK_URL`. Query `platform/event` e headers
+funcionais são preservados; credenciais, cookies e headers de infraestrutura
+nunca são retransmitidos. Cada envio inclui chave idempotente, ID do webhook,
+sequência de ingestão e hash SHA-256 do body original.
+
+O Vercel chama `/api/cron` a cada minuto. Cada execução tenta até 20 eventos
+Zouti por destino. A seleção é FIFO dentro da plataforma; eventos Hotmart
+permanecem pendentes até o adaptador Hotmart ser explicitamente implementado.
+
 ## Estrutura
 
 ```text
@@ -183,12 +196,15 @@ supabase/
 │   ├── 20260802100000_create_conta_azul_order_sync.sql
 │   ├── 20260802110000_add_deferred_event_status.sql
 │   ├── 20260802120000_delete_production_test_events.sql
-│   └── 20260802123000_support_conta_azul_service_links.sql
+│   ├── 20260802123000_support_conta_azul_service_links.sql
+│   ├── 20260802130000_claim_integration_jobs_by_platform.sql
+│   └── 20260802131000_add_human_os_worker_lease.sql
 └── functions/
     ├── _shared/
     ├── conta-azul-api/
     ├── conta-azul-auth/
     ├── conta-azul-worker/
+    ├── human-os-worker/
     ├── queue-status/
     └── zolt-webhook/
 scripts/load-test.ts
@@ -293,7 +309,7 @@ atualizam a mesma venda.
   criam vendas e podem ser reprocessados após a implementação do correlacionador.
 
 Cliente é correlacionado pelo ID da origem e localizado por CPF/CNPJ ou e-mail.
-Produto é correlacionado pelo ID da origem e por um SKU determinístico. A venda
+O item Zouti é correlacionado ao serviço existente `Academy Pass`. A venda
 guarda número, UUID, versão, conta financeira, categoria, fingerprint e a última
 sequência processada. Toda decisão fica em auditoria append-only.
 
@@ -305,13 +321,12 @@ Referências oficiais: [autenticação OAuth](https://developers.contaazul.com/a
 
 Os workers usarão estas RPCs internas, disponíveis apenas para `service_role`:
 
-- `claim_integration_jobs`: reserva somente o item ativo mais antigo, com
-  visibility timeout e bloqueio FIFO durante retries;
+- `claim_integration_jobs`: reserva somente o item ativo mais antigo da
+  plataforma solicitada, com visibility timeout e bloqueio FIFO durante retries;
 - `complete_integration_job`: registra a tentativa e arquiva um sucesso;
 - `fail_integration_job`: agenda retry exponencial ou move para dead-letter;
 - `middleware_queue_status`: produz o resumo seguro usado pelo endpoint.
 
-Antes de ativar o despacho Conta Azul em produção ainda é obrigatória uma criação
-controlada, seguida da conferência da venda e da baixa na interface. Já concluído:
-aplicação de produção `HumanOS`, callback OAuth, tokens criptografados, consultas
-reais, conta/categoria Zouti e mapeamento dos formatos recebidos.
+Validações controladas concluídas em produção: criação/baixa no Conta Azul,
+atualização detalhada da venda, entrega byte a byte ao HumanOS, isolamento de
+Hotmart, aplicação `HumanOS`, OAuth, tokens criptografados e conta/categoria Zouti.

@@ -32,3 +32,9 @@ enabled = true
 verify_jwt = false
 import_map = "./functions/conta-azul-worker/deno.json"
 entrypoint = "./functions/conta-azul-worker/index.ts"
+
+[functions.human-os-worker]
+enabled = true
+verify_jwt = false
+import_map = "./functions/human-os-worker/deno.json"
+entrypoint = "./functions/human-os-worker/index.ts"
