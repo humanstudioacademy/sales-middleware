@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   buildContaAzulPerson,
-  buildContaAzulProduct,
   buildContaAzulSale,
   classifyOrderTransition,
   classifyInboundCommerceEvent,
@@ -70,6 +69,7 @@ test("parses a Zouti order and normalizes monetary/customer fields", () => {
   assert.equal(order.normalizedStatus, "paid");
   assert.equal(order.totalAmount, 97.9);
   assert.equal(order.customer.document, "12345678901");
+  assert.equal(order.customer.phone, "11999999999");
   assert.equal(order.items[0].unitAmount, 97);
   assert.equal(contaAzulPaymentMethod(order), "OUTRO");
 });
@@ -144,10 +144,20 @@ test("allows a chargeback to supersede a refund but never regress it", () => {
   assert.equal(classifyOrderTransition({ ...previous, normalizedStatus: "chargeback" }, refunded, 22, "f".repeat(64)), "stale");
 });
 
-test("builds customer, product, and one balanced Conta Azul sale", () => {
+test("resumes the same queue delivery after persisting its order row", () => {
+  const order = parseZoutiOrder(paidPayload, "zouti");
+  assert.equal(classifyOrderTransition({
+    lastIngestSequence: 1388,
+    lastSourceUpdatedAt: order.sourceUpdatedAt,
+    payloadFingerprint: "a".repeat(64),
+    normalizedStatus: "paid",
+    lastAction: "received",
+  }, order, 1388, "a".repeat(64)), "apply");
+});
+
+test("builds customer and one balanced Conta Azul sale", () => {
   const order = parseZoutiOrder(paidPayload, "zouti");
   const person = buildContaAzulPerson(order);
-  const product = buildContaAzulProduct(order.items[0]);
   const sale = buildContaAzulSale(order, {
     customerId: "customer-uuid",
     productIds: ["product-uuid"],
@@ -155,13 +165,14 @@ test("builds customer, product, and one balanced Conta Azul sale", () => {
     financialAccountId: "account-uuid",
     categoryId: "category-uuid",
     situation: "APROVADO",
+    version: 0,
   });
 
   assert.equal(person.cpf, "12345678901");
-  assert.equal(String(product.codigo_sku).length, 20);
   assert.equal(sale.numero, 961);
   assert.equal(sale.id_categoria, "category-uuid");
   assert.equal(sale.situacao, "APROVADO");
+  assert.equal(sale.versao, 1);
   assert.equal(sale.itens[0].valor, 97.9);
   assert.equal(sale.condicao_pagamento.id_conta_financeira, "account-uuid");
   assert.equal(sale.condicao_pagamento.parcelas.length, 1);

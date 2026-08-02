@@ -90,6 +90,14 @@ function optionalString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function brazilianPhone(value: unknown): string | null {
+  let digits = optionalString(value)?.replace(/\D/g, "") ?? "";
+  if (digits.startsWith("55") && (digits.length === 12 || digits.length === 13)) {
+    digits = digits.slice(2);
+  }
+  return digits || null;
+}
+
 function finiteNumber(value: unknown, name: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) throw new Error(`Zouti mapping has invalid ${name}`);
@@ -258,7 +266,7 @@ export function parseZoutiOrder(body: unknown, sourcePlatform: string): Commerce
       name: requiredString(customer.name, "customer.name"),
       document,
       email,
-      phone: optionalString(customer.phone)?.replace(/\D/g, "") || null,
+      phone: brazilianPhone(customer.phone),
       address: shipping
         ? {
           postalCode: optionalString(shipping.postal_code)?.replace(/\D/g, "") || null,
@@ -283,6 +291,13 @@ export function classifyOrderTransition(
   payloadFingerprint: string,
 ): "apply" | "duplicate" | "stale" {
   if (!existing) return "apply";
+  // The order row is persisted before any upstream write. If the function dies
+  // before the append-only event is recorded, the same queue delivery must
+  // resume instead of being mistaken for stale input.
+  if (
+    existing.lastIngestSequence === ingestSequence &&
+    existing.payloadFingerprint === payloadFingerprint
+  ) return "apply";
   if (
     existing.payloadFingerprint === payloadFingerprint &&
     !["received", "syncing"].includes(existing.lastAction ?? "")
@@ -439,6 +454,6 @@ export function buildContaAzulSale(
     },
   };
   if (input.categoryId) sale.id_categoria = input.categoryId;
-  if (input.version) sale.versao = input.version;
+  if (input.version !== null && input.version !== undefined) sale.versao = Math.max(1, input.version);
   return sale;
 }

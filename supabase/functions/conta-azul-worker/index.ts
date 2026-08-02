@@ -3,7 +3,6 @@ import { databaseRequest, requiredEnvironment } from "../_shared/database.ts";
 import { authenticateBearerToken, sha256Hex } from "../_shared/webhook.ts";
 import {
   buildContaAzulPerson,
-  buildContaAzulProduct,
   buildContaAzulSale,
   classifyInboundCommerceEvent,
   classifyOrderTransition,
@@ -69,6 +68,7 @@ interface ProductLink {
   source_product_id: string;
   conta_azul_product_id: string;
   conta_azul_sku: string;
+  conta_azul_item_kind: "product" | "service";
   request_fingerprint: string;
 }
 
@@ -81,8 +81,8 @@ interface SaleDetails {
 }
 
 class ContaAzulHttpError extends Error {
-  constructor(public status: number, operation: string) {
-    super(`Conta Azul ${operation} failed (${status})`);
+  constructor(public status: number, operation: string, detail: string | null = null) {
+    super(`Conta Azul ${operation} failed (${status})${detail ? `: ${detail}` : ""}`);
   }
 }
 
@@ -122,7 +122,18 @@ function json(body: unknown, status = 200): Response {
 async function databaseJson(path: string, init: RequestInit): Promise<unknown> {
   const response = await databaseRequest(path, init);
   if (!response.ok) {
-    throw new Error(`Database operation failed (${response.status})`);
+    const raw = await response.text();
+    let detail = "";
+    try {
+      const value = object(JSON.parse(raw));
+      detail = [value?.code, value?.message, value?.details, value?.hint]
+        .filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+        .join(" | ");
+    } catch {
+      detail = raw;
+    }
+    detail = detail.replace(/[\w.+-]+@[\w.-]+/g, "[email]").replace(/\b\d{6,}\b/g, "[number]").slice(0, 500);
+    throw new Error(`Database operation failed (${response.status})${detail ? `: ${detail}` : ""}`);
   }
   if (response.status === 204) return null;
   const raw = await response.text();
@@ -151,10 +162,6 @@ async function contaAzulJson(
   acceptedStatuses: number[] = [],
 ): Promise<{ status: number; value: unknown }> {
   const response = await rateLimitedContaAzulRequest(path, init);
-  if (!response.ok && !acceptedStatuses.includes(response.status)) {
-    await response.arrayBuffer().catch(() => undefined);
-    throw new ContaAzulHttpError(response.status, operation);
-  }
   const raw = await response.text();
   let value: unknown = null;
   if (raw) {
@@ -163,6 +170,20 @@ async function contaAzulJson(
     } catch {
       value = raw;
     }
+  }
+  if (!response.ok && !acceptedStatuses.includes(response.status)) {
+    const error = object(value);
+    const errors = Array.isArray(error?.errors) ? error.errors : [];
+    const detail = [error?.message, error?.error, error?.code, ...errors.flatMap((item) => {
+      const entry = object(item);
+      return [entry?.field, entry?.message, entry?.code];
+    })]
+      .filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+      .join(" | ")
+      .replace(/[\w.+-]+@[\w.-]+/g, "[email]")
+      .replace(/\b\d{6,}\b/g, "[number]")
+      .slice(0, 800) || null;
+    throw new ContaAzulHttpError(response.status, operation, detail);
   }
   return { status: response.status, value };
 }
@@ -448,10 +469,10 @@ async function getProductLink(order: CommerceOrder, item: CommerceItem): Promise
   return rows[0] ?? null;
 }
 
-async function saveProductLink(
+async function saveServiceLink(
   order: CommerceOrder,
   item: CommerceItem,
-  productId: string,
+  serviceId: string,
   sku: string,
   requestFingerprint: string,
 ): Promise<void> {
@@ -466,8 +487,9 @@ async function saveProductLink(
       body: JSON.stringify({
         source_platform: order.sourcePlatform,
         source_product_id: item.sourceId,
-        conta_azul_product_id: productId,
+        conta_azul_product_id: serviceId,
         conta_azul_sku: sku,
+        conta_azul_item_kind: "service",
         request_fingerprint: requestFingerprint,
         updated_at: new Date().toISOString(),
       }),
@@ -475,46 +497,30 @@ async function saveProductLink(
   );
 }
 
-async function ensureProduct(order: CommerceOrder, item: CommerceItem): Promise<string> {
-  const product = buildContaAzulProduct(item);
-  const requestFingerprint = await fingerprint(product);
+async function ensureService(order: CommerceOrder, item: CommerceItem): Promise<string> {
+  const serviceName = Deno.env.get("CONTA_AZUL_DEFAULT_SERVICE_NAME")?.trim() || "Academy Pass";
   const linked = await getProductLink(order, item);
-  if (linked) {
-    if (linked.request_fingerprint !== requestFingerprint) {
-      await contaAzulJson(`/v1/produtos/${encodeURIComponent(linked.conta_azul_product_id)}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          codigo_sku: linked.conta_azul_sku,
-          nome: item.name.slice(0, 100),
-          valor_venda: item.unitAmount,
-        }),
-      }, "product update");
-      await saveProductLink(order, item, linked.conta_azul_product_id, linked.conta_azul_sku, requestFingerprint);
-    }
+  if (linked?.conta_azul_item_kind === "service") {
     return linked.conta_azul_product_id;
   }
 
   const sku = contaAzulSku(item.sourceId);
   const search = await contaAzulJson(
-    `/v1/produtos?pagina=1&tamanho_pagina=10&status=ATIVO&sku=${encodeURIComponent(sku)}`,
+    `/v1/servicos?pagina=1&tamanho_pagina=100&busca_textual=${encodeURIComponent(serviceName)}`,
     { method: "GET" },
-    "product lookup",
+    "service lookup",
   );
-  const matches = arrayFrom(search.value).map(stringId).filter((id): id is string => Boolean(id));
-  if (matches.length > 1) throw new Error("Conta Azul product lookup returned multiple matches");
-  let productId: string | null = matches[0] ?? null;
-  if (!productId) {
-    const created = await contaAzulJson("/v1/produtos", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(product),
-    }, "product creation");
-    productId = stringId(created.value);
+  const matches = arrayFrom(search.value).map(object).filter((service): service is JsonObject =>
+    Boolean(service) && normalizedLabel(service?.descricao) === normalizedLabel(serviceName) && service?.status === "ATIVO"
+  );
+  if (matches.length !== 1) {
+    throw new Error(`Conta Azul service is not uniquely mapped: ${serviceName}`);
   }
-  if (!productId) throw new Error("Conta Azul product operation returned no identifier");
-  await saveProductLink(order, item, productId, sku, requestFingerprint);
-  return productId;
+  const serviceId = stringId(matches[0]);
+  if (!serviceId) throw new Error("Conta Azul service operation returned no identifier");
+  const requestFingerprint = await fingerprint({ kind: "service", serviceId, serviceName });
+  await saveServiceLink(order, item, serviceId, sku, requestFingerprint);
+  return serviceId;
 }
 
 function saleDetails(value: unknown): SaleDetails | null {
@@ -790,7 +796,7 @@ async function processJob(
 
   const customerId = await ensureCustomer(order);
   const productIds: string[] = [];
-  for (const item of order.items) productIds.push(await ensureProduct(order, item));
+  for (const item of order.items) productIds.push(await ensureService(order, item));
   const salePayload = buildContaAzulSale(order, {
     customerId,
     productIds,
@@ -865,6 +871,10 @@ Deno.serve(async (request: Request): Promise<Response> => {
       return json({ error: "unauthorized" }, 401);
     }
 
+    const input = await request.json().catch(() => ({})) as {
+      batch_size?: unknown;
+    };
+
     const leaseToken = crypto.randomUUID();
     const acquired = await rpc("acquire_integration_worker_lease", {
       p_destination: "conta_azul",
@@ -874,7 +884,6 @@ Deno.serve(async (request: Request): Promise<Response> => {
     if (acquired !== true) return json({ status: "already_running" }, 202);
 
     try {
-      const input = await request.json().catch(() => ({})) as { batch_size?: unknown };
       const requested = Number(input.batch_size ?? 100);
       const batchSize = Number.isSafeInteger(requested) ? Math.min(Math.max(requested, 1), 300) : 100;
       const result = { claimed: 0, created: 0, updated: 0, recorded: 0, no_change: 0, failed: 0 };

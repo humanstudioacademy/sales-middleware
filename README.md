@@ -181,7 +181,9 @@ supabase/
 │   ├── 20260802080000_quarantine_ingress_validation_receipts.sql
 │   ├── 20260802090000_quarantine_binary_capture_validation.sql
 │   ├── 20260802100000_create_conta_azul_order_sync.sql
-│   └── 20260802110000_add_deferred_event_status.sql
+│   ├── 20260802110000_add_deferred_event_status.sql
+│   ├── 20260802120000_delete_production_test_events.sql
+│   └── 20260802123000_support_conta_azul_service_links.sql
 └── functions/
     ├── _shared/
     ├── conta-azul-api/
