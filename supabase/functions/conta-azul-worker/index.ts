@@ -642,11 +642,21 @@ async function ensureSaleSettled(
   order: CommerceOrder,
   financialAccountId: string,
 ): Promise<number | null> {
-  const refreshed = details.financialEventId ? details : await getSaleDetails(details.id);
+  let refreshed = details;
+  for (const delay of [0, 300, 700, 1_500, 2_500]) {
+    if (refreshed.financialEventId) break;
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    refreshed = await getSaleDetails(details.id);
+  }
   if (!refreshed.financialEventId) {
     throw new Error("Conta Azul sale returned no financial event for settlement");
   }
-  const installments = await listFinancialInstallments(refreshed.financialEventId);
+  let installments: JsonObject[] = [];
+  for (const delay of [0, 300, 700, 1_500]) {
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    installments = await listFinancialInstallments(refreshed.financialEventId);
+    if (installments.length > 0) break;
+  }
   if (installments.length === 0) throw new Error("Conta Azul sale returned no financial installments");
   let latestStatus: number | null = null;
   for (const installment of installments) {
