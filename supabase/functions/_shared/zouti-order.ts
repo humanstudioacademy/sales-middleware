@@ -378,6 +378,15 @@ export function isCancelledSaleSituation(value: string | null | undefined): bool
   return value?.trim().toUpperCase() === "CANCELADO";
 }
 
+export function saleObservationsBelongToOrder(
+  observations: string | null | undefined,
+  externalOrderId: string,
+): boolean {
+  if (!observations) return false;
+  return observations.includes(`Pedido Zouti: ${externalOrderId}`)
+    || observations.includes(`ordem ${externalOrderId}`);
+}
+
 export function contaAzulPaymentMethod(order: CommerceOrder): string {
   if (order.splitPayments.length > 1) return "OUTRO";
   const method = order.paymentMethod ?? order.splitPayments[0]?.method ?? "OUTRO";

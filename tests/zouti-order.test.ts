@@ -11,6 +11,7 @@ import {
   isCancelledSaleSituation,
   normalizeOrderStatus,
   parseZoutiOrder,
+  saleObservationsBelongToOrder,
 } from "../supabase/functions/_shared/zouti-order.ts";
 
 test("recognizes an already cancelled Conta Azul sale idempotently", () => {
@@ -18,6 +19,12 @@ test("recognizes an already cancelled Conta Azul sale idempotently", () => {
   assert.equal(isCancelledSaleSituation(" cancelado "), true);
   assert.equal(isCancelledSaleSituation("APROVADO"), false);
   assert.equal(isCancelledSaleSituation(null), false);
+});
+
+test("recognizes the durable Zouti order marker in Conta Azul observations", () => {
+  assert.equal(saleObservationsBelongToOrder("Pedido Zouti: ord_123", "ord_123"), true);
+  assert.equal(saleObservationsBelongToOrder("HumanOS | ordem ord_123", "ord_123"), true);
+  assert.equal(saleObservationsBelongToOrder("Pedido Zouti: ord_other", "ord_123"), false);
 });
 
 const paidPayload = {

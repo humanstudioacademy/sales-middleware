@@ -13,6 +13,7 @@ import {
   desiredOrderAction,
   isCancelledSaleSituation,
   parseZoutiOrder,
+  saleObservationsBelongToOrder,
 } from "../_shared/zouti-order.ts";
 
 type JsonObject = Record<string, unknown>;
@@ -188,6 +189,25 @@ async function contaAzulJson(
     throw new ContaAzulHttpError(response.status, operation, detail);
   }
   return { status: response.status, value };
+}
+
+async function createSaleAfterCustomerPropagation(salePayload: JsonObject): Promise<{ status: number; value: unknown }> {
+  const retryDelays = [300, 700, 1_500];
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await contaAzulJson("/v1/venda", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(salePayload),
+      }, "sale creation");
+    } catch (error) {
+      const customerStillPropagating = error instanceof ContaAzulHttpError
+        && error.status === 400
+        && /cliente da venda não encontrado/i.test(error.message);
+      if (!customerStillPropagating || attempt >= retryDelays.length) throw error;
+      await new Promise((resolve) => setTimeout(resolve, retryDelays[attempt]));
+    }
+  }
 }
 
 async function getOrderEvent(webhookId: string): Promise<boolean> {
@@ -563,7 +583,7 @@ async function findSaleByNumber(saleNumber: number, externalOrderId: string): Pr
     const summary = saleDetails(item);
     if (!summary) continue;
     const details = summary.observations ? summary : await getSaleDetails(summary.id);
-    if (details.observations?.includes(`ordem ${externalOrderId}`)) return details;
+    if (saleObservationsBelongToOrder(details.observations, externalOrderId)) return details;
     throw new SaleNumberCollisionError(`Conta Azul sale number ${saleNumber} belongs to another sale`);
   }
   return null;
@@ -831,11 +851,7 @@ async function processJob(
   let httpStatus: number | null = null;
   let result: "created" | "updated" = details ? "updated" : "created";
   if (!details) {
-    const response = await contaAzulJson("/v1/venda", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(salePayload),
-    }, "sale creation");
+    const response = await createSaleAfterCustomerPropagation(salePayload);
     details = saleDetails(response.value);
     if (!details) throw new Error("Conta Azul sale creation returned no identifier");
     httpStatus = response.status;
