@@ -6,6 +6,10 @@
       "destination": "/api/webhook"
     },
     {
+      "source": "/webhook/:path*",
+      "destination": "/api/webhook"
+    },
+    {
       "source": "/",
       "destination": "/api"
     }

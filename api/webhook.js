@@ -6,6 +6,8 @@ export const config = {
 };
 
 export default async function handler(request) {
+  const ingressReceivedAt = new Date().toISOString();
+
   if (request.method !== "POST") {
     return new Response(JSON.stringify({ error: "method_not_allowed" }), {
       status: 405,
@@ -29,10 +31,18 @@ export default async function handler(request) {
   storageUrl.search = incomingUrl.search;
 
   const headers = new Headers(request.headers);
+  const originalAuthorization = headers.get("authorization");
+  if (originalAuthorization) {
+    headers.set("x-webhook-original-authorization", originalAuthorization);
+  }
   headers.delete("host");
   headers.delete("content-length");
   headers.set("authorization", `Bearer ${secret}`);
   headers.set("x-forwarded-webhook-host", incomingUrl.host);
+  headers.set("x-webhook-original-url", incomingUrl.toString());
+  headers.set("x-webhook-original-path", incomingUrl.pathname);
+  headers.set("x-webhook-original-method", request.method);
+  headers.set("x-webhook-ingress-received-at", ingressReceivedAt);
 
   return fetch(storageUrl, {
     method: "POST",

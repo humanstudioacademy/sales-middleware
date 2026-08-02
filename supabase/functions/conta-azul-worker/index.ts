@@ -7,6 +7,8 @@ interface ClaimedJob {
   message_id: number;
   attempt_number: number;
   webhook_id: string;
+  ingest_sequence: number;
+  processing_started_at: string;
   body_sha256: string;
   body_json: unknown;
 }
@@ -110,7 +112,7 @@ async function complete(job: ClaimedJob, status: number | null): Promise<void> {
     p_message_id: job.message_id,
     p_webhook_id: job.webhook_id,
     p_attempt_number: job.attempt_number,
-    p_started_at: new Date().toISOString(),
+    p_started_at: job.processing_started_at,
     p_http_status: status,
   });
 }
@@ -123,7 +125,7 @@ async function fail(job: ClaimedJob, error: unknown): Promise<void> {
     p_message_id: job.message_id,
     p_webhook_id: job.webhook_id,
     p_attempt_number: job.attempt_number,
-    p_started_at: new Date().toISOString(),
+    p_started_at: job.processing_started_at,
     p_http_status: statusMatch ? Number(statusMatch[1]) : null,
     p_error_code: message.startsWith("Conta Azul mapping") || message.startsWith("Webhook body")
       ? "mapping_incomplete"
@@ -194,18 +196,25 @@ Deno.serve(async (request: Request): Promise<Response> => {
       const input = await request.json().catch(() => ({})) as { batch_size?: unknown };
       const requested = Number(input.batch_size ?? 100);
       const batchSize = Number.isSafeInteger(requested) ? Math.min(Math.max(requested, 1), 300) : 100;
-      const jobs = await rpc("claim_integration_jobs", {
-        p_destination: "conta_azul",
-        p_batch_size: batchSize,
-      }) as ClaimedJob[];
-      const result = { claimed: jobs.length, created: 0, already_created: 0, failed: 0 };
+      const result = { claimed: 0, created: 0, already_created: 0, failed: 0 };
 
-      for (const job of jobs) {
+      // Claim one item at a time. A failed purchase blocks any newer refund
+      // until the purchase succeeds or reaches dead-letter.
+      for (let index = 0; index < batchSize; index += 1) {
+        const jobs = await rpc("claim_integration_jobs", {
+          p_destination: "conta_azul",
+          p_batch_size: 1,
+        }) as ClaimedJob[];
+        const job = jobs[0];
+        if (!job) break;
+        result.claimed += 1;
+
         try {
           result[await processJob(job)] += 1;
         } catch (error) {
           result.failed += 1;
           await fail(job, error);
+          break;
         }
       }
       return json(result);

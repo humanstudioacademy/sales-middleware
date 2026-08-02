@@ -1,5 +1,5 @@
 export const ENVELOPE_SCHEMA_VERSION = 1 as const;
-export const INGEST_VERSION = 1 as const;
+export const INGEST_VERSION = 2 as const;
 
 export type HeaderPair = readonly [string, string];
 
@@ -136,13 +136,18 @@ function parseJson(text: string): { isJson: boolean; value: unknown | null } {
 }
 
 function extractWildcardSegments(path: string, functionName: string): string[] {
-  const marker = `/${functionName}`;
-  const markerIndex = path.indexOf(marker);
+  const markers = [`/${functionName}`, "/webhook"];
+  const marker = markers.find((candidate) => {
+    const index = path.indexOf(candidate);
+    const suffixStart = index + candidate.length;
+    return index >= 0 && (suffixStart === path.length || path[suffixStart] === "/");
+  });
 
-  if (markerIndex === -1) {
+  if (!marker) {
     return [];
   }
 
+  const markerIndex = path.indexOf(marker);
   const suffix = path.slice(markerIndex + marker.length).replace(/^\/+/, "");
   return suffix ? suffix.split("/").map(decodeURIComponent) : [];
 }
@@ -152,7 +157,18 @@ export async function captureRequest(
   capturedAt: string,
   functionName: string,
 ): Promise<RequestEnvelope> {
-  const url = new URL(request.url);
+  const forwardedUrl = request.headers.get("x-webhook-original-url");
+  let url = new URL(request.url);
+  if (forwardedUrl) {
+    try {
+      const parsedForwardedUrl = new URL(forwardedUrl);
+      if (parsedForwardedUrl.protocol === "https:" || parsedForwardedUrl.protocol === "http:") {
+        url = parsedForwardedUrl;
+      }
+    } catch {
+      // A malformed forwarding hint is preserved in headers but never trusted as the URL.
+    }
+  }
   const bodyBytes = new Uint8Array(await request.arrayBuffer());
   const bodyText = new TextDecoder().decode(bodyBytes);
   const parsedBody = parseJson(bodyText);

@@ -15,6 +15,10 @@ const SOURCE = "zolt";
 interface StoredReceipt {
   id: string;
   received_at: string;
+  received_at_epoch_ms: number;
+  ingest_sequence: number;
+  source_platform: string | null;
+  source_event_type: string | null;
 }
 
 function jsonResponse(body: unknown, status: number, extraHeaders: HeadersInit = {}): Response {
@@ -28,14 +32,17 @@ function jsonResponse(body: unknown, status: number, extraHeaders: HeadersInit =
 }
 
 async function storeEnvelope(row: Record<string, unknown>): Promise<StoredReceipt> {
-  const response = await databaseRequest("/rest/v1/webhook_inbox?select=id,received_at", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      prefer: "return=representation",
+  const response = await databaseRequest(
+    "/rest/v1/webhook_inbox?select=id,received_at,received_at_epoch_ms,ingest_sequence,source_platform,source_event_type",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        prefer: "return=representation",
+      },
+      body: JSON.stringify(row),
     },
-    body: JSON.stringify(row),
-  });
+  );
 
   if (!response.ok) {
     const diagnostic = (await response.text()).slice(0, 500);
@@ -52,7 +59,11 @@ async function storeEnvelope(row: Record<string, unknown>): Promise<StoredReceip
 
 Deno.serve(async (request: Request): Promise<Response> => {
   const requestId = crypto.randomUUID();
-  const capturedAt = new Date().toISOString();
+  const forwardedReceivedAt = request.headers.get("x-webhook-ingress-received-at");
+  const forwardedTimestamp = forwardedReceivedAt ? Date.parse(forwardedReceivedAt) : Number.NaN;
+  const capturedAt = Number.isFinite(forwardedTimestamp)
+    ? new Date(forwardedTimestamp).toISOString()
+    : new Date().toISOString();
 
   try {
     const webhookSecret = requiredEnvironment("ZOLT_WEBHOOK_SECRET");
@@ -78,6 +89,9 @@ Deno.serve(async (request: Request): Promise<Response> => {
     const receipt = await storeEnvelope({
       source: SOURCE,
       received_at: capturedAt,
+      received_at_epoch_ms: Date.parse(capturedAt),
+      source_platform: envelope.query_params.platform?.[0] ?? SOURCE,
+      source_event_type: envelope.query_params.event?.[0] ?? null,
       request_method: envelope.method,
       request_path: envelope.path,
       body_size_bytes: envelope.body.size_bytes,
@@ -102,6 +116,10 @@ Deno.serve(async (request: Request): Promise<Response> => {
       accepted: true,
       receipt_id: receipt.id,
       received_at: receipt.received_at,
+      received_at_epoch_ms: receipt.received_at_epoch_ms,
+      ingest_sequence: receipt.ingest_sequence,
+      platform: receipt.source_platform,
+      event: receipt.source_event_type,
     }, 200);
   } catch (error) {
     // Nunca registrar headers ou body: o payload integral pertence somente ao banco.

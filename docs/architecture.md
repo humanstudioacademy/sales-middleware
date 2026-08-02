@@ -21,6 +21,16 @@ o recibo depois do commit e só então responde `200`.
 As mensagens guardam apenas a referência e metadados de integridade; o payload
 continua com uma única fonte da verdade na inbox.
 
+`received_at` é capturado no primeiro código executado no domínio público com
+precisão de milissegundos. `received_at_epoch_ms` fornece a mesma informação em
+Unix milliseconds. A ordem definitiva não depende de
+empates do relógio: `ingest_sequence` é alocada por uma sequência global e nunca
+é reutilizada.
+
+Além da query integral criptografada, o primeiro valor de `platform` e `event`
+é materializado em `source_platform` e `source_event_type`, com índice conjunto
+com `ingest_sequence` para roteamento eficiente.
+
 ## Particionamento e índices
 
 `webhook_inbox` é particionada por hash do UUID em 16 partições. Isso distribui
@@ -36,17 +46,19 @@ As contagens de um e cinco minutos usam os índices temporais.
 ```mermaid
 stateDiagram-v2
   [*] --> pending: commit da inbox
-  pending --> leased: claim
-  leased --> succeeded: chamada aceita
-  leased --> retry_wait: erro recuperável
-  retry_wait --> leased: visibility timeout
-  leased --> dead_letter: limite de tentativas
-  leased --> pending: worker caiu e lease expirou
+  pending --> processing: claim FIFO
+  processing --> succeeded: chamada aceita
+  processing --> retry_wait: erro recuperável
+  retry_wait --> processing: horário agendado
+  processing --> dead_letter: limite de tentativas
+  processing --> pending: worker caiu e lease expirou
   succeeded --> [*]
   dead_letter --> [*]
 ```
 
-PGMQ incrementa `read_ct` a cada claim. `fail_integration_job` calcula backoff
+PGMQ incrementa `read_ct` a cada claim. `integration_processing_state` mantém o
+estado atual, `next_attempt_at`, início/fim e conclusão por destino, enquanto
+`integration_attempts` preserva cada tentativa. `fail_integration_job` calcula backoff
 exponencial a partir desse número, limitado a uma hora, com pequeno jitter. O
 padrão é 15 tentativas. O processador deve usar `webhook_id` como chave de
 idempotência no destino sempre que a API permitir: nenhum sistema distribuído
@@ -69,9 +81,9 @@ Cada destino possui configuração independente:
 
 Nesta fase os dois destinos enfileiram, mas não despacham. O worker Conta Azul
 usa um lease global para impedir duas execuções concorrentes e processa chamadas
-em série. Lotes da fila aceitam até 500 itens; o endpoint limita cada execução a
-300. O ritmo de saída respeita o limite oficial do destino e é deliberadamente
-independente da taxa de entrada.
+em série. Cada claim pega somente o menor `ingest_sequence` ativo. Se esse item
+entra em retry, o claim devolve vazio até o horário agendado; compra e reembolso
+não podem inverter a ordem. O endpoint pode executar até 300 claims sequenciais.
 
 Como a Conta Azul limita cada ERP a 10 requisições/s e 600/min, uma entrada
 contínua de 100–200 eventos/s necessariamente acumulará backlog. Isso não reduz a
@@ -82,7 +94,8 @@ e tamanho.
 
 | Falha | Comportamento |
 |---|---|
-| Segredo inválido | `401`; nada é armazenado |
+| Chamada pública sem segredo | aceita; o proxy injeta autenticação apenas internamente |
+| Acesso direto com segredo inválido | `401`; nada é armazenado |
 | Banco indisponível | `503` + `Retry-After`; origem deve reenviar |
 | Falha ao criar uma das filas | rollback da inbox e da outra fila |
 | Worker cai durante processamento | lease expira e mensagem reaparece |

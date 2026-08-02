@@ -1,7 +1,7 @@
 # Sales Middleware
 
 API de entrada e distribuição resiliente para integrações de vendas. O fluxo
-atual recebe webhooks autenticados da Zolt, preserva cada entrega e cria, na
+atual recebe webhooks públicos da Zolt, preserva cada entrega e cria, na
 mesma transação, um item durável para Conta Azul e outro para humanOS.
 
 Os disparos externos ficam desligados por padrão. A aplicação de produção
@@ -17,6 +17,15 @@ O endereço público no domínio da Human Academy é:
 ```text
 https://mid.humanacademy.ai/webhook
 ```
+
+Para classificar plataforma e evento já na entrada, cadastre por exemplo:
+
+```text
+https://mid.humanacademy.ai/webhook?platform=zouti&event=agl2
+```
+
+Os valores continuam dentro da query integral e também são materializados nas
+colunas indexadas `source_platform` e `source_event_type`.
 
 Ele aceita qualquer `POST` sem exigir header ou segredo da Zolt e encaminha o
 request integral para o receptor durável no Supabase, adicionando a autenticação
@@ -38,7 +47,8 @@ endpoint administrativo de status, sem expor segredos ou payloads.
 
 ```mermaid
 flowchart LR
-  Z["Zolt"] -->|"webhook autenticado"| E["Edge Function zolt-webhook"]
+  Z["Zolt"] -->|"POST público"| V["Vercel Edge ingress"]
+  V -->|"autenticação interna"| E["Edge Function zolt-webhook"]
   E --> T["Transação Postgres"]
   T --> I["Inbox imutável e criptografada"]
   T --> C["Fila durável Conta Azul"]
@@ -52,13 +62,22 @@ flowchart LR
 
 ## Garantias
 
-- Cada chamada autenticada gera uma nova linha, inclusive reenvios idênticos.
+- Cada `POST` público gera uma nova linha, inclusive reenvios idênticos.
 - A resposta `200` só é enviada depois que inbox e as duas filas foram gravadas.
 - Qualquer falha nessa transação resulta em `503` com `Retry-After`; não existe o
   estado “salvo sem fila” ou “fila sem webhook”.
 - O request completo disponível no runtime (método, URL, path, query string,
   parâmetros, headers e bytes exatos do body) é preservado em envelope
   AES-256-GCM.
+- `ingest_sequence` define uma ordem global e monotônica independente de empates
+  no relógio; `received_at` e `received_at_epoch_ms` preservam o instante de
+  ingresso com precisão de milissegundos.
+- `platform` e `event` da query são copiados para colunas indexadas sem remover
+  ou modificar a query original.
+- Cada destino possui estado atual, horário agendado, início/fim de tentativa e
+  conclusão; o histórico de tentativas é append-only.
+- O claim é FIFO estrito: se o evento mais antigo aguarda retry, nenhum evento
+  posterior daquele destino o ultrapassa.
 - O JSON fica disponível separadamente para os processadores e o SHA-256 valida
   os bytes exatos do body.
 - Credenciais são redigidas das colunas de consulta e preservadas somente no
@@ -91,7 +110,11 @@ Resposta após persistência confirmada:
 {
   "accepted": true,
   "receipt_id": "00000000-0000-0000-0000-000000000000",
-  "received_at": "2026-08-02T00:00:00.000000+00:00"
+  "received_at": "2026-08-02T00:00:00.123000+00:00",
+  "received_at_epoch_ms": 1785628800123,
+  "ingest_sequence": 12345,
+  "platform": "zouti",
+  "event": "agl2"
 }
 ```
 
@@ -146,7 +169,9 @@ supabase/
 │   ├── 20260802010000_create_integration_queues.sql
 │   ├── 20260802020000_fix_status_function_volatility.sql
 │   ├── 20260802030000_create_conta_azul_oauth.sql
-│   └── 20260802040000_allow_webhook_sale_deduplication.sql
+  │   ├── 20260802040000_allow_webhook_sale_deduplication.sql
+  │   ├── 20260802050000_retry_transient_token_refresh.sql
+  │   └── 20260802060000_add_ordered_processing_ledger.sql
 └── functions/
     ├── _shared/
     ├── conta-azul-api/
@@ -252,7 +277,8 @@ Referências oficiais: [autenticação OAuth](https://developers.contaazul.com/a
 
 Os workers usarão estas RPCs internas, disponíveis apenas para `service_role`:
 
-- `claim_integration_jobs`: reserva até 500 itens com visibility timeout;
+- `claim_integration_jobs`: reserva somente o item ativo mais antigo, com
+  visibility timeout e bloqueio FIFO durante retries;
 - `complete_integration_job`: registra a tentativa e arquiva um sucesso;
 - `fail_integration_job`: agenda retry exponencial ou move para dead-letter;
 - `middleware_queue_status`: produz o resumo seguro usado pelo endpoint.

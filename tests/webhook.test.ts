@@ -65,6 +65,28 @@ test("captures query repetitions, wildcard path, headers, and the exact body", a
   assert.equal(envelope.headers.some(([name]) => name === "x-zolt-event-id"), true);
 });
 
+test("captures the original public ingress URL and routing query", async () => {
+  const request = new Request(
+    "https://project.supabase.co/functions/v1/zolt-webhook?platform=wrong",
+    {
+      method: "POST",
+      headers: {
+        "x-webhook-original-url":
+          "https://mid.humanacademy.ai/webhook/orders/42?platform=zouti&event=agl2",
+      },
+      body: "raw-event",
+    },
+  );
+
+  const envelope = await captureRequest(request, "2026-08-02T12:00:00.123Z", "zolt-webhook");
+
+  assert.equal(envelope.url, "https://mid.humanacademy.ai/webhook/orders/42?platform=zouti&event=agl2");
+  assert.equal(envelope.path, "/webhook/orders/42");
+  assert.deepEqual(envelope.path_params.wildcard_segments, ["orders", "42"]);
+  assert.deepEqual(envelope.query_params.platform, ["zouti"]);
+  assert.deepEqual(envelope.query_params.event, ["agl2"]);
+});
+
 test("encrypts and decrypts the complete envelope without information loss", async () => {
   const request = new Request("https://example.com/functions/v1/zolt-webhook?signature=abc", {
     method: "POST",
