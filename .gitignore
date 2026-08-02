@@ -9,3 +9,4 @@ supabase/.branches/
 supabase/.temp/
 supabase/functions/.env*
 !supabase/functions/.env.example
+.vercel
