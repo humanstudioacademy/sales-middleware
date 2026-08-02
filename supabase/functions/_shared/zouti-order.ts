@@ -44,12 +44,20 @@ export interface CommerceOrder {
   sourceCreatedAt: string;
   sourceUpdatedAt: string;
   currency: string;
+  subtotalAmount: number | null;
   totalAmount: number;
+  paymentAmount: number | null;
   netAmount: number | null;
   feeAmount: number | null;
+  interestAmount: number | null;
+  interestTransferAmount: number | null;
   paymentMethod: string | null;
+  paymentType: string | null;
   installments: number;
-  splitPayments: Array<{ method: string; amount: number }>;
+  isSplitPayment: boolean;
+  splitPayments: Array<{ role: string | null; method: string; amount: number }>;
+  orderSessionId: string | null;
+  attribution: Record<string, string>;
   customer: CommerceCustomer;
   items: CommerceItem[];
 }
@@ -108,6 +116,13 @@ function money(inBrl: unknown, minorUnits: unknown, name: string): number {
   const explicit = Number(inBrl);
   if (Number.isFinite(explicit)) return Math.round(explicit * 100) / 100;
   return Math.round((finiteNumber(minorUnits, name) / 100) * 100) / 100;
+}
+
+function optionalMoney(inBrl: unknown, minorUnits: unknown, name: string): number | null {
+  if (inBrl === null || inBrl === undefined) {
+    if (minorUnits === null || minorUnits === undefined) return null;
+  }
+  return money(inBrl, minorUnits, name);
 }
 
 function isoDateTime(value: unknown, name: string): string {
@@ -211,6 +226,8 @@ export function parseZoutiOrder(body: unknown, sourcePlatform: string): Commerce
 
   const shipping = object(root.shipping_address);
   const payment = object(root.payment);
+  const utm = object(root.utm_data);
+  const tracking = object(root.tracking);
   const sourceStatus = requiredString(root.status, "status").toUpperCase();
   const totalAmount = money(root.amount_total_in_brl, root.amount_total, "amount_total");
   if (totalAmount < 0) throw new Error("Zouti mapping requires a non-negative total");
@@ -236,6 +253,7 @@ export function parseZoutiOrder(body: unknown, sourcePlatform: string): Commerce
       const split = object(raw);
       if (!split || !optionalString(split.method)) return [];
       return [{
+        role: optionalString(split.role),
         method: requiredString(split.method, "split_payments.method").toUpperCase(),
         amount: money(undefined, split.amount, "split_payments.amount"),
       }];
@@ -246,6 +264,15 @@ export function parseZoutiOrder(body: unknown, sourcePlatform: string): Commerce
   const email = optionalString(customer.email)?.toLowerCase() ?? null;
   const createdAt = isoDateTime(root.created_at, "created_at");
   const updatedAt = isoDateTime(root.updated_at ?? root.created_at, "updated_at");
+  const attribution = Object.fromEntries([
+    ["utm_source", optionalString(utm?.utm_source) ?? optionalString(tracking?.source)],
+    ["utm_medium", optionalString(utm?.utm_medium) ?? optionalString(tracking?.medium)],
+    ["utm_campaign", optionalString(utm?.utm_campaign) ?? optionalString(tracking?.campaign)],
+    ["utm_content", optionalString(utm?.utm_content)],
+    ["utm_term", optionalString(utm?.utm_term)],
+    ["src", optionalString(tracking?.src)],
+    ["sck", optionalString(tracking?.sck)],
+  ].filter((entry): entry is [string, string] => Boolean(entry[1])));
 
   return {
     sourcePlatform: normalizePlatform(optionalString(root.provider) ?? sourcePlatform),
@@ -255,12 +282,28 @@ export function parseZoutiOrder(body: unknown, sourcePlatform: string): Commerce
     sourceCreatedAt: createdAt,
     sourceUpdatedAt: updatedAt,
     currency: requiredString(root.currency, "currency").toUpperCase(),
+    subtotalAmount: optionalMoney(root.amount_subtotal_in_brl, root.amount_subtotal, "amount_subtotal"),
     totalAmount,
-    netAmount: payment ? money(payment.net_amount_in_brl, payment.net_amount, "payment.net_amount") : null,
-    feeAmount: payment ? money(payment.fee_in_brl, payment.fee, "payment.fee") : null,
+    paymentAmount: payment ? optionalMoney(payment.amount_in_brl, payment.amount, "payment.amount") : null,
+    netAmount: payment ? optionalMoney(payment.net_amount_in_brl, payment.net_amount, "payment.net_amount") : null,
+    feeAmount: payment ? optionalMoney(payment.fee_in_brl, payment.fee, "payment.fee") : null,
+    interestAmount: payment
+      ? optionalMoney(payment.interest_amount_in_brl, payment.interest_amount, "payment.interest_amount")
+      : null,
+    interestTransferAmount: payment
+      ? optionalMoney(
+        payment.interest_transfer_amount_in_brl,
+        payment.interest_transfer_amount,
+        "payment.interest_transfer_amount",
+      )
+      : null,
     paymentMethod: optionalString(payment?.method)?.toUpperCase() ?? null,
+    paymentType: optionalString(root.payment_type)?.toUpperCase() ?? null,
     installments: Math.max(1, Math.trunc(Number(payment?.installments) || 1)),
+    isSplitPayment: root.is_split_payment === true || splitPayments.length > 1,
     splitPayments,
+    orderSessionId: optionalString(root.order_session_id),
+    attribution,
     customer: {
       sourceId: requiredString(root.customer_id, "customer_id"),
       name: requiredString(customer.name, "customer.name"),
@@ -399,13 +442,78 @@ export function buildContaAzulProduct(item: CommerceItem): JsonObject {
   };
 }
 
+function brl(value: number): string {
+  return `R$ ${value.toFixed(2).replace(".", ",")}`;
+}
+
+function statusLabel(status: NormalizedOrderStatus): string {
+  return {
+    paid: "Aprovado/pago",
+    pending: "Pendente",
+    rejected: "Recusado/reprovado",
+    cancelled: "Cancelado",
+    refunded: "Reembolsado",
+    chargeback: "Chargeback/contestação",
+    unknown: "Não mapeado",
+  }[status];
+}
+
 function paymentDescription(order: CommerceOrder): string {
-  const methods = order.splitPayments.length
-    ? order.splitPayments.map((split) => `${split.method} R$ ${split.amount.toFixed(2)}`).join(" + ")
-    : `${order.paymentMethod ?? "OUTRO"} em ${order.installments}x`;
-  return `Zouti ${methods}; bruto R$ ${order.totalAmount.toFixed(2)}; líquido R$ ${
-    (order.netAmount ?? order.totalAmount).toFixed(2)
-  }; taxa R$ ${(order.feeAmount ?? 0).toFixed(2)}`;
+  const lines = [
+    "PAGAMENTO ZOUTI",
+    `Situação: ${statusLabel(order.normalizedStatus)} (${order.sourceStatus})`,
+    `Método: ${order.paymentMethod ?? "Não informado"}`,
+    `Tipo: ${order.paymentType ?? "Não informado"}`,
+    `Parcelamento: ${order.installments === 1 ? "À vista (1x)" : `${order.installments} parcelas`}`,
+    `Moeda: ${order.currency}`,
+    order.subtotalAmount === null ? null : `Subtotal: ${brl(order.subtotalAmount)}`,
+    `Total cobrado: ${brl(order.paymentAmount ?? order.totalAmount)}`,
+    order.interestAmount === null ? null : `Juros: ${brl(order.interestAmount)}`,
+    order.interestTransferAmount === null ? null : `Juros repassados: ${brl(order.interestTransferAmount)}`,
+    `Taxa da plataforma: ${brl(order.feeAmount ?? 0)}`,
+    `Valor líquido: ${brl(order.netAmount ?? order.totalAmount)}`,
+  ].filter((line): line is string => Boolean(line));
+  if (order.splitPayments.length) {
+    lines.push("Divisão do pagamento:");
+    order.splitPayments.forEach((split, index) => {
+      lines.push(`- ${split.role ?? `Parte ${index + 1}`}: ${split.method} — ${brl(split.amount)}`);
+    });
+  } else {
+    lines.push(`Pagamento dividido: ${order.isSplitPayment ? "Sim" : "Não"}`);
+  }
+  return lines.join("\n").slice(0, 4000);
+}
+
+function saleDescription(
+  order: CommerceOrder,
+  trace?: { webhookId: string; ingestSequence: number; receivedAt: string; eventType: string | null },
+): string {
+  const lines = [
+    "INTEGRAÇÃO HUMANOS • ZOUTI",
+    `Situação atual: ${statusLabel(order.normalizedStatus)} (${order.sourceStatus})`,
+    `Pedido Zouti: ${order.externalOrderId}`,
+    order.orderSessionId ? `Sessão do pedido: ${order.orderSessionId}` : null,
+    `Criado na Zouti: ${order.sourceCreatedAt}`,
+    `Atualizado na Zouti: ${order.sourceUpdatedAt}`,
+    trace ? `Recebido pelo HumanOS: ${trace.receivedAt}` : null,
+    trace?.eventType ? `Evento de entrada: ${trace.eventType}` : null,
+    trace ? `Webhook: ${trace.webhookId}` : null,
+    trace ? `Sequência de ingestão: ${trace.ingestSequence}` : null,
+    "",
+    "ITENS",
+    ...order.items.flatMap((item, index) => [
+      `${index + 1}. ${item.name}`,
+      `   Produto Zouti: ${item.sourceId}${item.type ? ` | Tipo: ${item.type}` : ""}`,
+      `   Quantidade: ${item.quantity} | Unitário: ${brl(item.unitAmount)} | Total: ${brl(item.unitAmount * item.quantity)}`,
+      item.description ? `   Descrição: ${item.description}` : null,
+    ]),
+  ].filter((line): line is string => line !== null);
+  const attribution = Object.entries(order.attribution);
+  if (attribution.length) {
+    lines.push("", "ATRIBUIÇÃO / CAMPANHA");
+    attribution.forEach(([key, value]) => lines.push(`${key}: ${value}`));
+  }
+  return lines.join("\n").slice(0, 4000);
 }
 
 export function buildContaAzulSale(
@@ -418,6 +526,7 @@ export function buildContaAzulSale(
     categoryId: string | null;
     situation: "APROVADO" | "CANCELADO";
     version?: number | null;
+    trace?: { webhookId: string; ingestSequence: number; receivedAt: string; eventType: string | null };
   },
 ): JsonObject {
   if (input.productIds.length !== order.items.length) {
@@ -433,11 +542,16 @@ export function buildContaAzulSale(
     numero: input.saleNumber,
     situacao: input.situation,
     data_venda: order.sourceCreatedAt.slice(0, 10),
-    observacoes: `HumanOS | ${order.sourcePlatform.toUpperCase()} | ordem ${order.externalOrderId} | status ${order.sourceStatus}`,
+    observacoes: saleDescription(order, input.trace),
     observacoes_pagamento: paymentDescription(order),
     itens: order.items.map((item, index) => ({
       id: input.productIds[index],
-      descricao: (item.description ?? item.name).slice(0, 400),
+      descricao: [
+        item.name,
+        item.description,
+        `Produto Zouti: ${item.sourceId}`,
+        item.type ? `Tipo: ${item.type}` : null,
+      ].filter(Boolean).join(" | ").slice(0, 400),
       quantidade: item.quantity,
       valor: values[index],
     })),

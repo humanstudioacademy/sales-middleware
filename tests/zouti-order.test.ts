@@ -21,6 +21,10 @@ const paidPayload = {
   updated_at: "2026-08-02T10:00:00.000Z",
   amount_total: 9790,
   amount_total_in_brl: 97.9,
+  amount_subtotal: 9700,
+  amount_subtotal_in_brl: 97,
+  payment_type: "ONE_TIME",
+  order_session_id: "session_example_123",
   customer_id: "cus_example_123",
   customer: {
     name: "Cliente Exemplo",
@@ -56,11 +60,20 @@ const paidPayload = {
     net_amount_in_brl: 95,
     fee: 290,
     fee_in_brl: 2.9,
+    interest_amount: 90,
+    interest_amount_in_brl: 0.9,
+    interest_transfer_amount: 0,
+    interest_transfer_amount_in_brl: 0,
   },
   split_payments: [
     { role: "PAYMENT_0", method: "CREDIT_CARD", amount: 5000 },
     { role: "PAYMENT_1", method: "PIX", amount: 4790 },
   ],
+  utm_data: {
+    utm_source: "instagram",
+    utm_medium: "paid_social",
+    utm_campaign: "academy_pass",
+  },
 };
 
 test("parses a Zouti order and normalizes monetary/customer fields", () => {
@@ -71,6 +84,10 @@ test("parses a Zouti order and normalizes monetary/customer fields", () => {
   assert.equal(order.customer.document, "12345678901");
   assert.equal(order.customer.phone, "11999999999");
   assert.equal(order.items[0].unitAmount, 97);
+  assert.equal(order.subtotalAmount, 97);
+  assert.equal(order.interestAmount, 0.9);
+  assert.equal(order.paymentType, "ONE_TIME");
+  assert.equal(order.attribution.utm_campaign, "academy_pass");
   assert.equal(contaAzulPaymentMethod(order), "OUTRO");
 });
 
@@ -166,6 +183,12 @@ test("builds customer and one balanced Conta Azul sale", () => {
     categoryId: "category-uuid",
     situation: "APROVADO",
     version: 0,
+    trace: {
+      webhookId: "00000000-0000-4000-8000-000000000001",
+      ingestSequence: 1388,
+      receivedAt: "2026-08-02T10:00:01.123Z",
+      eventType: "purchase_approved",
+    },
   });
 
   assert.equal(person.cpf, "12345678901");
@@ -174,6 +197,12 @@ test("builds customer and one balanced Conta Azul sale", () => {
   assert.equal(sale.situacao, "APROVADO");
   assert.equal(sale.versao, 1);
   assert.equal(sale.itens[0].valor, 97.9);
+  assert.match(String(sale.observacoes), /Situação atual: Aprovado\/pago \(PAID\)/);
+  assert.match(String(sale.observacoes), /Sequência de ingestão: 1388/);
+  assert.match(String(sale.observacoes), /utm_campaign: academy_pass/);
+  assert.match(String(sale.observacoes_pagamento), /Taxa da plataforma: R\$ 2,90/);
+  assert.match(String(sale.observacoes_pagamento), /Valor líquido: R\$ 95,00/);
+  assert.match(String(sale.observacoes_pagamento), /PAYMENT_0: CREDIT_CARD — R\$ 50,00/);
   assert.equal(sale.condicao_pagamento.id_conta_financeira, "account-uuid");
   assert.equal(sale.condicao_pagamento.parcelas.length, 1);
 });

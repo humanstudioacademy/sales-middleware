@@ -21,6 +21,7 @@ interface ClaimedJob {
   attempt_number: number;
   webhook_id: string;
   ingest_sequence: number;
+  received_at: string;
   processing_started_at: string;
   source_platform: string;
   source_event_type: string | null;
@@ -805,6 +806,12 @@ async function processJob(
     categoryId: mapping.category_id,
     situation: action === "cancel_sale" ? "CANCELADO" : "APROVADO",
     version: details?.version,
+    trace: {
+      webhookId: job.webhook_id,
+      ingestSequence: job.ingest_sequence,
+      receivedAt: job.received_at,
+      eventType: job.source_event_type,
+    },
   });
 
   let httpStatus: number | null = null;
@@ -838,6 +845,12 @@ async function processJob(
       categoryId: mapping.category_id,
       situation: action === "cancel_sale" ? "CANCELADO" : "APROVADO",
       version: refreshed.version,
+      trace: {
+        webhookId: job.webhook_id,
+        ingestSequence: job.ingest_sequence,
+        receivedAt: job.received_at,
+        eventType: job.source_event_type,
+      },
     });
     const response = await contaAzulJson(`/v1/venda/${encodeURIComponent(details.id)}`, {
       method: "PUT",
@@ -861,6 +874,72 @@ async function processJob(
   return result;
 }
 
+async function refreshExistingSaleBySequence(ingestSequence: number): Promise<JsonObject> {
+  const rows = await databaseJson(
+    `/rest/v1/webhook_inbox?select=id,ingest_sequence,received_at,source_platform,source_event_type,body_json&ingest_sequence=eq.${ingestSequence}&limit=1`,
+    { method: "GET" },
+  ) as Array<{
+    id: string;
+    ingest_sequence: number;
+    received_at: string;
+    source_platform: string;
+    source_event_type: string | null;
+    body_json: unknown;
+  }>;
+  const inbox = rows[0];
+  if (!inbox) throw new Error("Webhook not found for Conta Azul refresh");
+
+  const order = parseZoutiOrder(inbox.body_json, inbox.source_platform);
+  const orderRow = await getOrder(order.sourcePlatform, order.externalOrderId);
+  if (!orderRow?.conta_azul_sale_id || !orderRow.conta_azul_sale_number) {
+    throw new Error("Conta Azul sale is not linked for refresh");
+  }
+
+  const mapping = await resolvePlatformMapping(order);
+  const customerId = await ensureCustomer(order);
+  const productIds: string[] = [];
+  for (const item of order.items) productIds.push(await ensureService(order, item));
+  let details = await getSaleDetails(orderRow.conta_azul_sale_id);
+  const action = desiredOrderAction(order.normalizedStatus, true);
+  if (action === "cancel_sale") await reverseSaleSettlements(details);
+  const payload = buildContaAzulSale(order, {
+    customerId,
+    productIds,
+    saleNumber: orderRow.conta_azul_sale_number,
+    financialAccountId: mapping.financial_account_id!,
+    categoryId: mapping.category_id,
+    situation: action === "cancel_sale" ? "CANCELADO" : "APROVADO",
+    version: details.version,
+    trace: {
+      webhookId: inbox.id,
+      ingestSequence: inbox.ingest_sequence,
+      receivedAt: inbox.received_at,
+      eventType: inbox.source_event_type,
+    },
+  });
+  const response = await contaAzulJson(`/v1/venda/${encodeURIComponent(details.id)}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  }, "sale refresh");
+  details = await getSaleDetails(details.id);
+  if (action === "upsert_sale") await ensureSaleSettled(details, order, mapping.financial_account_id!);
+  await patchOrder(orderRow.id, {
+    current_source_status: order.sourceStatus,
+    normalized_status: order.normalizedStatus,
+    last_action: action === "cancel_sale" ? "sale_cancelled_refreshed" : "sale_refreshed",
+    last_synced_at: new Date().toISOString(),
+    conta_azul_customer_id: customerId,
+    conta_azul_sale_version: details.version,
+  });
+  return {
+    status: "refreshed",
+    sale_id: details.id,
+    sale_number: orderRow.conta_azul_sale_number,
+    upstream_status: response.status,
+  };
+}
+
 Deno.serve(async (request: Request): Promise<Response> => {
   if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   try {
@@ -873,7 +952,16 @@ Deno.serve(async (request: Request): Promise<Response> => {
 
     const input = await request.json().catch(() => ({})) as {
       batch_size?: unknown;
+      operation?: unknown;
+      ingest_sequence?: unknown;
     };
+    if (input.operation === "refresh_sale") {
+      const ingestSequence = Number(input.ingest_sequence);
+      if (!Number.isSafeInteger(ingestSequence) || ingestSequence < 1) {
+        return json({ error: "invalid_ingest_sequence" }, 400);
+      }
+      return json(await refreshExistingSaleBySequence(ingestSequence));
+    }
 
     const leaseToken = crypto.randomUUID();
     const acquired = await rpc("acquire_integration_worker_lease", {
