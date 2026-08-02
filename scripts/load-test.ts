@@ -7,9 +7,6 @@ const eventsPerSecond = Number(process.env.EVENTS_PER_SECOND ?? "200");
 const durationSeconds = Number(process.env.DURATION_SECONDS ?? "5");
 const batchesPerSecond = 20;
 
-if (!secret) {
-  throw new Error("ZOLT_WEBHOOK_SECRET is required");
-}
 if (!Number.isSafeInteger(eventsPerSecond) || eventsPerSecond < 1 || eventsPerSecond > 5_000) {
   throw new Error("EVENTS_PER_SECOND must be an integer between 1 and 5000");
 }
@@ -20,21 +17,27 @@ if (!Number.isSafeInteger(durationSeconds) || durationSeconds < 1 || durationSec
 const totalEvents = eventsPerSecond * durationSeconds;
 const latencies: number[] = [];
 const failures: Array<{ status: number; body: string }> = [];
+const ingestSequences = new Set<number>();
 let sent = 0;
 const startedAt = performance.now();
+const requests: Promise<void>[] = [];
 
 async function sendEvent(sequence: number): Promise<void> {
   const requestStartedAt = performance.now();
   const eventId = `load-${Date.now()}-${sequence}-${crypto.randomUUID()}`;
 
   try {
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      "x-zolt-event-id": eventId,
+    };
+    if (secret) {
+      headers.authorization = `Bearer ${secret}`;
+    }
+
     const response = await fetch(endpoint, {
       method: "POST",
-      headers: {
-        authorization: `Bearer ${secret}`,
-        "content-type": "application/json",
-        "x-zolt-event-id": eventId,
-      },
+      headers,
       body: JSON.stringify({
         id: eventId,
         type: "load-test.event",
@@ -45,7 +48,19 @@ async function sendEvent(sequence: number): Promise<void> {
     const body = await response.text();
     if (response.status !== 200) {
       failures.push({ status: response.status, body: body.slice(0, 200) });
+      return;
     }
+
+    const result = JSON.parse(body);
+    if (result.accepted !== true || !Number.isSafeInteger(result.ingest_sequence)) {
+      failures.push({ status: response.status, body: "invalid acceptance response" });
+      return;
+    }
+    if (ingestSequences.has(result.ingest_sequence)) {
+      failures.push({ status: response.status, body: "duplicate ingest sequence" });
+      return;
+    }
+    ingestSequences.add(result.ingest_sequence);
   } catch (error) {
     failures.push({ status: 0, body: error instanceof Error ? error.message : "network error" });
   } finally {
@@ -58,20 +73,20 @@ for (let batch = 0; sent < totalEvents; batch += 1) {
     totalEvents,
     Math.round(((batch + 1) * eventsPerSecond) / batchesPerSecond),
   );
-  const requests: Promise<void>[] = [];
-
   while (sent < targetSent) {
     requests.push(sendEvent(sent));
     sent += 1;
   }
 
-  await Promise.all(requests);
   const targetElapsed = ((batch + 1) * 1_000) / batchesPerSecond;
   const waitMilliseconds = targetElapsed - (performance.now() - startedAt);
   if (waitMilliseconds > 0) {
     await new Promise((resolve) => setTimeout(resolve, waitMilliseconds));
   }
 }
+
+const dispatchSeconds = (performance.now() - startedAt) / 1_000;
+await Promise.all(requests);
 
 latencies.sort((left, right) => left - right);
 const percentile = (value: number): number => {
@@ -86,6 +101,8 @@ console.log(JSON.stringify({
   sent,
   succeeded: sent - failures.length,
   failed: failures.length,
+  unique_ingest_sequences: ingestSequences.size,
+  dispatch_seconds: Number(dispatchSeconds.toFixed(2)),
   achieved_events_per_second: Number((sent / elapsedSeconds).toFixed(1)),
   latency_ms: {
     p50: percentile(0.50),
@@ -99,4 +116,3 @@ if (failures.length > 0) {
   console.error(JSON.stringify({ sample_failures: failures.slice(0, 5) }, null, 2));
   process.exitCode = 1;
 }
-

@@ -24,7 +24,9 @@ Para classificar plataforma e evento já na entrada, cadastre por exemplo:
 https://mid.humanacademy.ai/webhook?platform=zouti&event=agl2
 ```
 
-Os valores continuam dentro da query integral e também são materializados nas
+Os dois parâmetros são opcionais e independentes. Sem `platform`, a coluna de
+origem recebe `zolt`; sem `event`, a coluna de evento fica nula. Quando enviados,
+os valores continuam dentro da query integral e também são materializados nas
 colunas indexadas `source_platform` e `source_event_type`.
 
 Ele aceita qualquer `POST` sem exigir header ou segredo da Zolt e encaminha o
@@ -40,8 +42,9 @@ O endereço direto exige `Authorization: Bearer <ZOLT_WEBHOOK_SECRET>`. Ele apon
 para a Edge Function que persiste inbox e filas na mesma transação.
 
 O endereço de descoberta e saúde publicado no Vercel é
-`https://mid.humanacademy.ai`. Ele retorna a URL canônica de ingestão e o
-endpoint administrativo de status, sem expor segredos ou payloads.
+`https://mid.humanacademy.ai`. Ele consulta o estado real do Supabase e das
+filas: retorna `200 operational` quando a dependência responde corretamente e
+`503 degraded` em caso de falha, sem expor segredos, payloads ou volumes.
 
 ## Fluxo
 
@@ -169,9 +172,9 @@ supabase/
 │   ├── 20260802010000_create_integration_queues.sql
 │   ├── 20260802020000_fix_status_function_volatility.sql
 │   ├── 20260802030000_create_conta_azul_oauth.sql
-  │   ├── 20260802040000_allow_webhook_sale_deduplication.sql
-  │   ├── 20260802050000_retry_transient_token_refresh.sql
-  │   └── 20260802060000_add_ordered_processing_ledger.sql
+│   ├── 20260802040000_allow_webhook_sale_deduplication.sql
+│   ├── 20260802050000_retry_transient_token_refresh.sql
+│   └── 20260802060000_add_ordered_processing_ledger.sql
 └── functions/
     ├── _shared/
     ├── conta-azul-api/
@@ -180,7 +183,9 @@ supabase/
     ├── queue-status/
     └── zolt-webhook/
 scripts/load-test.ts
-tests/webhook.test.ts
+tests/
+├── health.test.ts
+└── webhook.test.ts
 ```
 
 Detalhes de concorrência, estados, falhas e capacidade estão em
@@ -246,8 +251,15 @@ EVENTS_PER_SECOND=200 DURATION_SECONDS=30 npm run load-test
 
 O teste local executado em 2 de agosto de 2026 ofereceu 1.000 eventos em cinco
 segundos: 1.000 respostas de sucesso, 1.000 linhas na inbox, 1.000 mensagens em
-cada fila e zero perdas. Isso valida o desenho e o ambiente local; a capacidade
-de produção ainda deve ser confirmada no plano/compute real do Supabase.
+cada fila e zero perdas.
+
+Na produção, uma oferta de 100 eventos/s durante cinco segundos persistiu
+500/500 eventos, com 500 sequências únicas e nenhuma falha, tanto pelo domínio
+público quanto diretamente pelo Supabase. Porém, a vazão concluída ficou perto
+de 37 eventos/s e a latência p95 perto de 8 segundos. O ambiente preserva os
+eventos nesse pico curto, mas o compute atual ainda não sustenta 100–200/s com
+latência saudável; é necessário dimensionar o Supabase e repetir um ensaio
+prolongado antes de assumir SLA.
 
 ## Contrato Zolt → Conta Azul
 

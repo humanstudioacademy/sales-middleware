@@ -29,7 +29,9 @@ empates do relógio: `ingest_sequence` é alocada por uma sequência global e nu
 
 Além da query integral criptografada, o primeiro valor de `platform` e `event`
 é materializado em `source_platform` e `source_event_type`, com índice conjunto
-com `ingest_sequence` para roteamento eficiente.
+com `ingest_sequence` para roteamento eficiente. Ambos são opcionais e
+independentes. A ausência de `platform` mantém `zolt` como origem conhecida; a
+ausência de `event` mantém o tipo nulo.
 
 ## Particionamento e índices
 
@@ -109,7 +111,22 @@ e tamanho.
 ## Capacidade e crescimento
 
 O teste local sustentou a oferta de 200 eventos/s por cinco segundos sem falhas.
-Isso é uma validação funcional/de carga curta, não um SLA do plano Supabase.
+Em produção, dois ensaios de 100 eventos/s por cinco segundos — pelo domínio
+público e diretamente pelo Supabase — salvaram 500/500 eventos em cada caminho,
+sem falhas e com sequências únicas. A conclusão ficou em aproximadamente 37/s e
+a latência p95 em 8 segundos nos dois caminhos. Isso localiza a saturação no
+caminho Supabase/transactional, e não no proxy Vercel. O resultado comprova
+integridade durante a rajada, mas não capacidade saudável de 100–200/s nem SLA.
+
+O projeto possui backup físico diário concluído, mas o PITR está desativado.
+Enquanto essa configuração permanecer, o objetivo de recuperação é limitado ao
+último backup diário disponível. Para produção, é necessário decidir e testar:
+
+- compute do Postgres dimensionado por teste prolongado;
+- PITR com janela compatível com o máximo aceitável de perda de dados;
+- monitor externo do healthcheck e procedimento de incidente;
+- retry exponencial configurado na origem Zolt;
+- ensaio periódico de restauração e replay.
 
 A taxa contínua é volumosa:
 
