@@ -174,7 +174,10 @@ supabase/
 │   ├── 20260802030000_create_conta_azul_oauth.sql
 │   ├── 20260802040000_allow_webhook_sale_deduplication.sql
 │   ├── 20260802050000_retry_transient_token_refresh.sql
-│   └── 20260802060000_add_ordered_processing_ledger.sql
+│   ├── 20260802060000_add_ordered_processing_ledger.sql
+│   ├── 20260802070000_quarantine_production_load_tests.sql
+│   ├── 20260802080000_quarantine_ingress_validation_receipts.sql
+│   └── 20260802090000_quarantine_binary_capture_validation.sql
 └── functions/
     ├── _shared/
     ├── conta-azul-api/
@@ -260,6 +263,10 @@ de 37 eventos/s e a latência p95 perto de 8 segundos. O ambiente preserva os
 eventos nesse pico curto, mas o compute atual ainda não sustenta 100–200/s com
 latência saudável; é necessário dimensionar o Supabase e repetir um ensaio
 prolongado antes de assumir SLA.
+
+Os recibos desses ensaios continuam imutáveis na inbox. Seus itens de fila,
+identificados pela plataforma `load_test*`, foram arquivados como dead-letter
+operacional para nunca serem enviados aos sistemas reais nem bloquearem o FIFO.
 
 ## Contrato Zolt → Conta Azul
 
