@@ -4,10 +4,28 @@ API de entrada e distribuição resiliente para integrações de vendas. O fluxo
 atual recebe webhooks autenticados da Zolt, preserva cada entrega e cria, na
 mesma transação, um item durável para Conta Azul e outro para humanOS.
 
-Os disparos externos ficam desligados por padrão. A integração Conta Azul já
-possui OAuth, renovação atômica de tokens, cliente de leitura/criação de vendas e
-worker; os eventos só serão enviados depois da homologação da conta de
-desenvolvimento e da ativação explícita de `dispatch_enabled`.
+Os disparos externos ficam desligados por padrão. A aplicação de produção
+`HumanOS` está conectada à Conta Azul por OAuth, com renovação atômica de tokens,
+cliente de leitura/criação de vendas e worker. A leitura da API de produção foi
+validada; os eventos só serão enviados depois da confirmação do mapeamento Zolt
+e da ativação explícita de `dispatch_enabled`.
+
+## Endpoint de produção
+
+O receptor público e durável dos webhooks da Zolt é:
+
+```text
+https://hyvomeibqlfchxqaevkc.supabase.co/functions/v1/zolt-webhook
+```
+
+Use `POST` e envie o segredo em `Authorization: Bearer <ZOLT_WEBHOOK_SECRET>`.
+Esse endereço aponta diretamente para a Edge Function que persiste inbox e
+filas na mesma transação. Um proxy no Vercel não deve ficar na frente desse
+endpoint, pois acrescentaria uma etapa que poderia falhar antes do armazenamento.
+
+O endereço de descoberta e saúde publicado no Vercel é
+`https://mid.humanacademy.ai`. Ele retorna a URL canônica de ingestão e o
+endpoint administrativo de status, sem expor segredos ou payloads.
 
 ## Fluxo
 
@@ -235,7 +253,8 @@ Os workers usarão estas RPCs internas, disponíveis apenas para `service_role`:
 Antes de ativar o despacho Conta Azul em produção, ainda precisamos confirmar:
 
 - objeto criado/atualizado (venda, cliente, produto, financeiro etc.);
-- credenciais do aplicativo de desenvolvimento (`client_id` e `client_secret`);
-- callback e conta ERP fictícia autorizada;
-- uma leitura e uma criação controlada bem-sucedidas;
+- uma criação controlada bem-sucedida;
 - mapeamento do payload real da Zolt para o contrato acima.
+
+Já concluído: aplicação de produção `HumanOS`, callback OAuth, armazenamento
+criptografado dos tokens e consulta real de vendas com resposta HTTP 200.
