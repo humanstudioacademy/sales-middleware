@@ -14,7 +14,7 @@ export default function handler(_request, response) {
       method: "POST",
       url: WEBHOOK_ENDPOINT,
       direct_storage_url: DIRECT_WEBHOOK_ENDPOINT,
-      authentication: "Authorization: Bearer <ZOLT_WEBHOOK_SECRET>",
+      authentication: "none at public ingress; secret injected internally",
     },
     queue_status: {
       method: "GET",

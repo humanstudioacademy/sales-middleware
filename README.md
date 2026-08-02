@@ -18,16 +18,17 @@ O endereço público no domínio da Human Academy é:
 https://mid.humanacademy.ai/webhook
 ```
 
-Ele encaminha o request integral para o receptor durável no Supabase. O endereço
-direto, com uma etapa a menos e recomendado como fallback, é:
+Ele aceita qualquer `POST` sem exigir header ou segredo da Zolt e encaminha o
+request integral para o receptor durável no Supabase, adicionando a autenticação
+somente no salto interno. O endereço direto, com uma etapa a menos e recomendado
+como fallback administrativo, é:
 
 ```text
 https://hyvomeibqlfchxqaevkc.supabase.co/functions/v1/zolt-webhook
 ```
 
-Use `POST` e envie o segredo em `Authorization: Bearer <ZOLT_WEBHOOK_SECRET>`.
-Esse endereço aponta diretamente para a Edge Function que persiste inbox e
-filas na mesma transação. Ambos usam `POST` e a mesma autenticação.
+O endereço direto exige `Authorization: Bearer <ZOLT_WEBHOOK_SECRET>`. Ele aponta
+para a Edge Function que persiste inbox e filas na mesma transação.
 
 O endereço de descoberta e saúde publicado no Vercel é
 `https://mid.humanacademy.ai`. Ele retorna a URL canônica de ingestão e o
