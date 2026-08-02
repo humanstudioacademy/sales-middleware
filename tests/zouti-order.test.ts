@@ -169,6 +169,34 @@ test("allows a chargeback to supersede a refund but never regress it", () => {
   assert.equal(classifyOrderTransition({ ...previous, normalizedStatus: "chargeback" }, refunded, 22, "f".repeat(64)), "stale");
 });
 
+test("never reactivates a cancelled order and ignores an identical paid webhook", () => {
+  const paid = parseZoutiOrder(paidPayload, "zouti");
+  const cancelled = parseZoutiOrder({
+    ...paidPayload,
+    status: "CANCELLED",
+    updated_at: "2026-08-02T12:00:00.000Z",
+  }, "zouti");
+
+  assert.equal(classifyOrderTransition({
+    lastIngestSequence: 30,
+    lastSourceUpdatedAt: paid.sourceUpdatedAt,
+    payloadFingerprint: "a".repeat(64),
+    normalizedStatus: "paid",
+    lastAction: "sale_created",
+  }, paid, 31, "a".repeat(64)), "duplicate");
+
+  assert.equal(classifyOrderTransition({
+    lastIngestSequence: 40,
+    lastSourceUpdatedAt: cancelled.sourceUpdatedAt,
+    payloadFingerprint: "b".repeat(64),
+    normalizedStatus: "cancelled",
+    lastAction: "sale_cancelled",
+  }, {
+    ...paid,
+    sourceUpdatedAt: "2026-08-02T13:00:00.000Z",
+  }, 41, "c".repeat(64)), "stale");
+});
+
 test("resumes the same queue delivery after persisting its order row", () => {
   const order = parseZoutiOrder(paidPayload, "zouti");
   assert.equal(classifyOrderTransition({
