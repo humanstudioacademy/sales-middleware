@@ -1,0 +1,34 @@
+project_id = "sales-middleware"
+
+[analytics]
+enabled = false
+
+[functions.zolt-webhook]
+enabled = true
+verify_jwt = false
+import_map = "./functions/zolt-webhook/deno.json"
+entrypoint = "./functions/zolt-webhook/index.ts"
+
+[functions.queue-status]
+enabled = true
+verify_jwt = false
+import_map = "./functions/queue-status/deno.json"
+entrypoint = "./functions/queue-status/index.ts"
+
+[functions.conta-azul-auth]
+enabled = true
+verify_jwt = false
+import_map = "./functions/conta-azul-auth/deno.json"
+entrypoint = "./functions/conta-azul-auth/index.ts"
+
+[functions.conta-azul-api]
+enabled = true
+verify_jwt = false
+import_map = "./functions/conta-azul-api/deno.json"
+entrypoint = "./functions/conta-azul-api/index.ts"
+
+[functions.conta-azul-worker]
+enabled = true
+verify_jwt = false
+import_map = "./functions/conta-azul-worker/deno.json"
+entrypoint = "./functions/conta-azul-worker/index.ts"

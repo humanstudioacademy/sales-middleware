@@ -1,0 +1,13 @@
+{
+  "name": "sales-middleware",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.ts",
+    "check": "node --test tests/*.test.ts",
+    "load-test": "node --env-file=supabase/functions/.env scripts/load-test.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}

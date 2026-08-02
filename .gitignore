@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+.DS_Store
+.supabase-cli-config/
+coverage/
+node_modules/
+supabase/.branches/
+supabase/.temp/
+supabase/functions/.env*
+!supabase/functions/.env.example
