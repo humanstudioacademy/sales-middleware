@@ -37,18 +37,30 @@ Deno.serve(async (request: Request): Promise<Response> => {
     const recentLimit = Number.isSafeInteger(requestedLimit)
       ? Math.min(Math.max(requestedLimit, 0), 100)
       : 20;
-    const response = await databaseRequest("/rest/v1/rpc/middleware_queue_status", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ p_recent_limit: recentLimit }),
-    });
+    const [response, ingressResponse] = await Promise.all([
+      databaseRequest("/rest/v1/rpc/middleware_queue_status", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ p_recent_limit: recentLimit }),
+      }),
+      databaseRequest("/rest/v1/rpc/middleware_recent_ingress", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ p_recent_limit: recentLimit }),
+      }),
+    ]);
 
     if (!response.ok) {
       const diagnostic = (await response.text()).slice(0, 500);
       throw new Error(`Queue status query failed (${response.status}): ${diagnostic}`);
     }
 
-    return jsonResponse(await response.json(), 200);
+    if (!ingressResponse.ok) {
+      const diagnostic = (await ingressResponse.text()).slice(0, 500);
+      throw new Error(`Recent ingress query failed (${ingressResponse.status}): ${diagnostic}`);
+    }
+
+    return jsonResponse({ ...await response.json(), recent_ingress: await ingressResponse.json() }, 200);
   } catch (error) {
     console.error("queue_status_failed", {
       request_id: requestId,
@@ -61,4 +73,3 @@ Deno.serve(async (request: Request): Promise<Response> => {
     );
   }
 });
-

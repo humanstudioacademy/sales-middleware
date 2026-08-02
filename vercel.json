@@ -12,6 +12,22 @@
     {
       "source": "/",
       "destination": "/api"
+    },
+    {
+      "source": "/admin",
+      "destination": "/api/admin"
+    },
+    {
+      "source": "/admin/login",
+      "destination": "/api/admin-login"
+    },
+    {
+      "source": "/admin/logout",
+      "destination": "/api/admin-logout"
+    },
+    {
+      "source": "/admin/data",
+      "destination": "/api/admin-data"
     }
   ],
   "crons": [

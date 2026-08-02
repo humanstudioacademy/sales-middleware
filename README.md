@@ -134,6 +134,12 @@ O retorno contém volume recebido, pendentes, em lease/retry, sucessos,
 dead-letters, idade do item mais antigo e resultados recentes. Ele nunca expõe
 body, headers ou envelope.
 
+### `GET /admin`
+
+Painel operacional protegido por senha, com sessão assinada em cookie `HttpOnly`.
+Atualiza a cada dois segundos somente metadados sanitizados de entrada, filas e
+entregas. O payload integral dos webhooks nunca é exposto no painel.
+
 ### `conta-azul-auth`
 
 - `POST /functions/v1/conta-azul-auth/start`: gera uma URL OAuth; requer
