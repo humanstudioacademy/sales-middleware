@@ -1,4 +1,5 @@
 import { contaAzulRequest } from "../_shared/conta-azul.ts";
+import { contaAzulReadPath } from "../_shared/conta-azul-admin.ts";
 import { requiredEnvironment } from "../_shared/database.ts";
 import { authenticateBearerToken } from "../_shared/webhook.ts";
 
@@ -16,9 +17,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
 
     if (request.method === "GET") {
       const input = new URL(request.url);
-      const upstream = new URL("/v1/venda/busca", "https://api-v2.contaazul.com");
-      for (const [key, value] of input.searchParams) upstream.searchParams.append(key, value);
-      const response = await contaAzulRequest(`${upstream.pathname}${upstream.search}`);
+      const response = await contaAzulRequest(contaAzulReadPath(input));
       return new Response(await response.arrayBuffer(), {
         status: response.status,
         headers: { "content-type": response.headers.get("content-type") ?? "application/json", "cache-control": "no-store" },

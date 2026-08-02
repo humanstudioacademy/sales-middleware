@@ -1,7 +1,21 @@
 import { contaAzulRequest } from "../_shared/conta-azul.ts";
 import { databaseRequest, requiredEnvironment } from "../_shared/database.ts";
-import { mapWebhookToContaAzulSale } from "../_shared/sale-mapper.ts";
 import { authenticateBearerToken, sha256Hex } from "../_shared/webhook.ts";
+import {
+  buildContaAzulPerson,
+  buildContaAzulProduct,
+  buildContaAzulSale,
+  classifyInboundCommerceEvent,
+  classifyOrderTransition,
+  contaAzulPaymentMethod,
+  contaAzulSku,
+  type CommerceItem,
+  type CommerceOrder,
+  desiredOrderAction,
+  parseZoutiOrder,
+} from "../_shared/zouti-order.ts";
+
+type JsonObject = Record<string, unknown>;
 
 interface ClaimedJob {
   message_id: number;
@@ -9,101 +23,648 @@ interface ClaimedJob {
   webhook_id: string;
   ingest_sequence: number;
   processing_started_at: string;
+  source_platform: string;
+  source_event_type: string | null;
   body_sha256: string;
   body_json: unknown;
 }
 
+interface OrderRow {
+  id: string;
+  source_platform: string;
+  external_order_id: string;
+  current_source_status: string;
+  normalized_status: CommerceOrder["normalizedStatus"];
+  last_ingest_sequence: number;
+  last_source_updated_at: string | null;
+  payload_fingerprint: string;
+  conta_azul_customer_id: string | null;
+  conta_azul_sale_id: string | null;
+  conta_azul_sale_number: number | null;
+  conta_azul_sale_version: number | null;
+  financial_account_id: string | null;
+  category_id: string | null;
+  last_action: string;
+  last_synced_at: string | null;
+}
+
+interface PlatformMapping {
+  source_platform: string;
+  financial_account_id: string | null;
+  financial_account_name: string | null;
+  category_id: string | null;
+  category_name: string | null;
+  enabled: boolean;
+}
+
+interface CustomerLink {
+  source_platform: string;
+  source_customer_id: string;
+  conta_azul_customer_id: string;
+  request_fingerprint: string;
+}
+
+interface ProductLink {
+  source_platform: string;
+  source_product_id: string;
+  conta_azul_product_id: string;
+  conta_azul_sku: string;
+  request_fingerprint: string;
+}
+
+interface SaleDetails {
+  id: string;
+  version: number | null;
+  situation: string | null;
+  financialEventId: string | null;
+  observations: string | null;
+}
+
+class ContaAzulHttpError extends Error {
+  constructor(public status: number, operation: string) {
+    super(`Conta Azul ${operation} failed (${status})`);
+  }
+}
+
+class SaleNumberCollisionError extends Error {}
+
 let lastUpstreamCallAt = 0;
 
-async function rateLimitedContaAzulRequest(path: string, init: RequestInit = {}): Promise<Response> {
-  const waitMilliseconds = Math.max(0, 125 - (Date.now() - lastUpstreamCallAt));
-  if (waitMilliseconds > 0) {
-    await new Promise((resolve) => setTimeout(resolve, waitMilliseconds));
-  }
-  lastUpstreamCallAt = Date.now();
-  return await contaAzulRequest(path, init);
+function object(value: unknown): JsonObject | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as JsonObject
+    : null;
+}
+
+function arrayFrom(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  const record = object(value);
+  const candidate = record?.items ?? record?.itens ?? record?.content;
+  return Array.isArray(candidate) ? candidate : [];
+}
+
+function stringId(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  const record = object(value);
+  const candidate = record?.id ?? record?.uuid ?? record?.id_venda;
+  return typeof candidate === "string" && candidate.trim() ? candidate.trim() : null;
+}
+
+function numberValue(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store" } });
 }
 
-async function rpc(name: string, body: Record<string, unknown>): Promise<unknown> {
-  const response = await databaseRequest(`/rest/v1/rpc/${name}`, {
+async function databaseJson(path: string, init: RequestInit): Promise<unknown> {
+  const response = await databaseRequest(path, init);
+  if (!response.ok) {
+    throw new Error(`Database operation failed (${response.status})`);
+  }
+  if (response.status === 204) return null;
+  const raw = await response.text();
+  return raw ? JSON.parse(raw) : null;
+}
+
+async function rpc(name: string, body: JsonObject): Promise<unknown> {
+  return await databaseJson(`/rest/v1/rpc/${name}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!response.ok) {
-    throw new Error(`${name} failed (${response.status}): ${(await response.text()).slice(0, 500)}`);
+}
+
+async function rateLimitedContaAzulRequest(path: string, init: RequestInit = {}): Promise<Response> {
+  const waitMilliseconds = Math.max(0, 125 - (Date.now() - lastUpstreamCallAt));
+  if (waitMilliseconds > 0) await new Promise((resolve) => setTimeout(resolve, waitMilliseconds));
+  lastUpstreamCallAt = Date.now();
+  return await contaAzulRequest(path, init);
+}
+
+async function contaAzulJson(
+  path: string,
+  init: RequestInit,
+  operation: string,
+  acceptedStatuses: number[] = [],
+): Promise<{ status: number; value: unknown }> {
+  const response = await rateLimitedContaAzulRequest(path, init);
+  if (!response.ok && !acceptedStatuses.includes(response.status)) {
+    await response.arrayBuffer().catch(() => undefined);
+    throw new ContaAzulHttpError(response.status, operation);
   }
-  return await response.json();
-}
-
-async function existingSaleId(webhookId: string): Promise<string | null> {
-  const response = await databaseRequest(
-    `/rest/v1/conta_azul_sale_links?select=conta_azul_sale_id&webhook_id=eq.${encodeURIComponent(webhookId)}&limit=1`,
-    { method: "GET" },
-  );
-  if (!response.ok) throw new Error(`Unable to inspect sale link (${response.status})`);
-  const rows = await response.json() as Array<{ conta_azul_sale_id: string }>;
-  return rows[0]?.conta_azul_sale_id ?? null;
-}
-
-function saleIdFromResponse(value: unknown): string | null {
-  if (typeof value === "string" && value) return value;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  const candidate = record.id ?? record.id_venda ?? record.uuid;
-  return typeof candidate === "string" && candidate ? candidate : null;
-}
-
-async function findSaleByNumber(saleNumber: unknown): Promise<string | null> {
-  const parsed = Number(saleNumber);
-  if (!Number.isSafeInteger(parsed) || parsed < 0) {
-    throw new Error("Conta Azul sale number must be a non-negative integer");
-  }
-  const query = new URLSearchParams({
-    pagina: "1",
-    tamanho_pagina: "10",
-    numeros: String(parsed),
-  });
-  const response = await rateLimitedContaAzulRequest(`/v1/venda/busca?${query}`);
   const raw = await response.text();
-  if (!response.ok) {
-    throw new Error(`Conta Azul sale lookup failed (${response.status}): ${raw.slice(0, 1000)}`);
+  let value: unknown = null;
+  if (raw) {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      value = raw;
+    }
   }
-  const decoded = raw ? JSON.parse(raw) as Record<string, unknown> : {};
-  const items = Array.isArray(decoded.itens) ? decoded.itens : [];
-  for (const item of items) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-    const record = item as Record<string, unknown>;
-    if (Number(record.numero) !== parsed) continue;
-    const id = saleIdFromResponse(record) ?? saleIdFromResponse(record.venda);
-    if (id) return id;
+  return { status: response.status, value };
+}
+
+async function getOrderEvent(webhookId: string): Promise<boolean> {
+  const rows = await databaseJson(
+    `/rest/v1/conta_azul_order_events?select=webhook_id&webhook_id=eq.${encodeURIComponent(webhookId)}&limit=1`,
+    { method: "GET" },
+  ) as Array<{ webhook_id: string }>;
+  return Boolean(rows[0]);
+}
+
+async function getDeferredEvent(webhookId: string): Promise<boolean> {
+  const rows = await databaseJson(
+    `/rest/v1/conta_azul_deferred_events?select=webhook_id&webhook_id=eq.${encodeURIComponent(webhookId)}&limit=1`,
+    { method: "GET" },
+  ) as Array<{ webhook_id: string }>;
+  return Boolean(rows[0]);
+}
+
+async function deferEvent(
+  job: ClaimedJob,
+  event: Exclude<ReturnType<typeof classifyInboundCommerceEvent>, { disposition: "process_order" }>,
+): Promise<void> {
+  await databaseJson(
+    "/rest/v1/conta_azul_deferred_events?on_conflict=webhook_id",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        prefer: "resolution=merge-duplicates,return=minimal",
+      },
+      body: JSON.stringify({
+        webhook_id: job.webhook_id,
+        ingest_sequence: job.ingest_sequence,
+        source_platform: job.source_platform,
+        entity_kind: event.entityKind,
+        external_entity_id: event.externalEntityId,
+        related_order_id: event.relatedOrderId,
+        source_status: event.sourceStatus,
+        reason: event.reason,
+        payload_fingerprint: job.body_sha256,
+      }),
+    },
+  );
+}
+
+async function getOrder(platform: string, externalOrderId: string): Promise<OrderRow | null> {
+  const rows = await databaseJson(
+    `/rest/v1/conta_azul_orders?select=*&source_platform=eq.${encodeURIComponent(platform)}&external_order_id=eq.${encodeURIComponent(externalOrderId)}&limit=1`,
+    { method: "GET" },
+  ) as OrderRow[];
+  return rows[0] ?? null;
+}
+
+async function insertOrder(job: ClaimedJob, order: CommerceOrder): Promise<OrderRow> {
+  const rows = await databaseJson("/rest/v1/conta_azul_orders?select=*", {
+    method: "POST",
+    headers: { "content-type": "application/json", prefer: "return=representation" },
+    body: JSON.stringify({
+      source_platform: order.sourcePlatform,
+      external_order_id: order.externalOrderId,
+      source_customer_id: order.customer.sourceId,
+      current_source_status: order.sourceStatus,
+      normalized_status: order.normalizedStatus,
+      last_webhook_id: job.webhook_id,
+      last_ingest_sequence: job.ingest_sequence,
+      last_source_updated_at: order.sourceUpdatedAt,
+      payload_fingerprint: job.body_sha256,
+      last_action: "received",
+    }),
+  }) as OrderRow[];
+  if (!rows[0]) throw new Error("Database did not return the inserted order");
+  return rows[0];
+}
+
+async function patchOrder(id: string, fields: JsonObject): Promise<OrderRow> {
+  const rows = await databaseJson(
+    `/rest/v1/conta_azul_orders?id=eq.${encodeURIComponent(id)}&select=*`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json", prefer: "return=representation" },
+      body: JSON.stringify({ ...fields, updated_at: new Date().toISOString() }),
+    },
+  ) as OrderRow[];
+  if (!rows[0]) throw new Error("Database did not return the updated order");
+  return rows[0];
+}
+
+async function recordOrderEvent(
+  job: ClaimedJob,
+  orderRow: OrderRow,
+  order: CommerceOrder,
+  action: string,
+  httpStatus: number | null,
+): Promise<void> {
+  await databaseJson("/rest/v1/conta_azul_order_events?on_conflict=webhook_id", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      prefer: "resolution=ignore-duplicates,return=minimal",
+    },
+    body: JSON.stringify({
+      webhook_id: job.webhook_id,
+      order_id: orderRow.id,
+      ingest_sequence: job.ingest_sequence,
+      source_status: order.sourceStatus,
+      normalized_status: order.normalizedStatus,
+      payload_fingerprint: job.body_sha256,
+      action,
+      conta_azul_http_status: httpStatus,
+    }),
+  });
+}
+
+async function getPlatformMapping(platform: string): Promise<PlatformMapping | null> {
+  const rows = await databaseJson(
+    `/rest/v1/conta_azul_platform_mappings?select=*&source_platform=eq.${encodeURIComponent(platform)}&limit=1`,
+    { method: "GET" },
+  ) as PlatformMapping[];
+  return rows[0] ?? null;
+}
+
+function normalizedLabel(value: unknown): string {
+  return String(value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+async function resolvePlatformMapping(order: CommerceOrder): Promise<PlatformMapping> {
+  const configured = await getPlatformMapping(order.sourcePlatform);
+  if (configured) {
+    if (!configured.enabled || !configured.financial_account_id) {
+      throw new Error(`Conta Azul platform mapping is disabled or incomplete: ${order.sourcePlatform}`);
+    }
+    return configured;
+  }
+
+  const accountsResult = await contaAzulJson(
+    "/v1/conta-financeira?pagina=1&tamanho_pagina=100",
+    { method: "GET" },
+    "financial account lookup",
+  );
+  const platformLabel = normalizedLabel(order.sourcePlatform);
+  const candidates = arrayFrom(accountsResult.value).map(object).filter((account): account is JsonObject => {
+    if (!account) return false;
+    const name = normalizedLabel(account.nome);
+    return name.includes(platformLabel) && String(account.tipo ?? "") === "CONTA_CORRENTE";
+  });
+  if (candidates.length !== 1) {
+    throw new Error(`Conta Azul financial account is not uniquely mapped for platform: ${order.sourcePlatform}`);
+  }
+  const accountId = stringId(candidates[0]);
+  const accountName = typeof candidates[0].nome === "string" ? candidates[0].nome : null;
+  if (!accountId || !accountName) throw new Error("Conta Azul financial account returned no identifier");
+
+  const categoriesResult = await contaAzulJson(
+    "/v1/categorias?pagina=1&tamanho_pagina=100&tipo=RECEITA&apenas_filhos=true&permite_apenas_filhos=true",
+    { method: "GET" },
+    "category lookup",
+  );
+  const searchable = normalizedLabel(order.items.map((item) => `${item.name} ${item.description ?? ""}`).join(" "));
+  const preferred = searchable.includes("workshop")
+    ? "workshop corporativa online"
+    : searchable.includes("saas")
+    ? "saas b2c"
+    : "cursos online b2c";
+  const category = arrayFrom(categoriesResult.value).map(object).find((candidate) =>
+    candidate && normalizedLabel(candidate.nome).includes(preferred)
+  ) ?? null;
+  const categoryId = stringId(category);
+  const categoryName = typeof category?.nome === "string" ? category.nome : null;
+
+  const rows = await databaseJson(
+    "/rest/v1/conta_azul_platform_mappings?on_conflict=source_platform&select=*",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        prefer: "resolution=merge-duplicates,return=representation",
+      },
+      body: JSON.stringify({
+        source_platform: order.sourcePlatform,
+        financial_account_id: accountId,
+        financial_account_name: accountName,
+        category_id: categoryId,
+        category_name: categoryName,
+        resolved_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }),
+    },
+  ) as PlatformMapping[];
+  if (!rows[0]) throw new Error("Conta Azul platform mapping could not be persisted");
+  return rows[0];
+}
+
+async function fingerprint(value: unknown): Promise<string> {
+  return await sha256Hex(new TextEncoder().encode(JSON.stringify(value)));
+}
+
+async function getCustomerLink(order: CommerceOrder): Promise<CustomerLink | null> {
+  const rows = await databaseJson(
+    `/rest/v1/conta_azul_customer_links?select=*&source_platform=eq.${encodeURIComponent(order.sourcePlatform)}&source_customer_id=eq.${encodeURIComponent(order.customer.sourceId)}&limit=1`,
+    { method: "GET" },
+  ) as CustomerLink[];
+  return rows[0] ?? null;
+}
+
+async function saveCustomerLink(
+  order: CommerceOrder,
+  customerId: string,
+  requestFingerprint: string,
+): Promise<void> {
+  await databaseJson(
+    "/rest/v1/conta_azul_customer_links?on_conflict=source_platform,source_customer_id",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        prefer: "resolution=merge-duplicates,return=minimal",
+      },
+      body: JSON.stringify({
+        source_platform: order.sourcePlatform,
+        source_customer_id: order.customer.sourceId,
+        normalized_document: order.customer.document,
+        normalized_email: order.customer.email,
+        conta_azul_customer_id: customerId,
+        request_fingerprint: requestFingerprint,
+        updated_at: new Date().toISOString(),
+      }),
+    },
+  );
+}
+
+async function ensureCustomer(order: CommerceOrder): Promise<string> {
+  const person = buildContaAzulPerson(order);
+  const requestFingerprint = await fingerprint(person);
+  const linked = await getCustomerLink(order);
+  if (linked) {
+    if (linked.request_fingerprint !== requestFingerprint) {
+      await contaAzulJson(`/v1/pessoas/${encodeURIComponent(linked.conta_azul_customer_id)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(person),
+      }, "customer update");
+      await saveCustomerLink(order, linked.conta_azul_customer_id, requestFingerprint);
+    }
+    return linked.conta_azul_customer_id;
+  }
+
+  const query = new URLSearchParams({ pagina: "1", tamanho_pagina: "10", tipo_perfil: "Cliente" });
+  if (order.customer.document) query.set("documentos", order.customer.document);
+  else if (order.customer.email) query.set("emails", order.customer.email);
+  else throw new Error("Conta Azul customer mapping requires a document or email");
+  const search = await contaAzulJson(`/v1/pessoas?${query}`, { method: "GET" }, "customer lookup");
+  const matches = arrayFrom(search.value).map(stringId).filter((id): id is string => Boolean(id));
+  if (matches.length > 1) throw new Error("Conta Azul customer lookup returned multiple matches");
+
+  let customerId: string | null = matches[0] ?? null;
+  if (!customerId) {
+    const created = await contaAzulJson("/v1/pessoas", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(person),
+    }, "customer creation");
+    customerId = stringId(created.value);
+  } else {
+    await contaAzulJson(`/v1/pessoas/${encodeURIComponent(customerId)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(person),
+    }, "customer update");
+  }
+  if (!customerId) throw new Error("Conta Azul customer operation returned no identifier");
+  await saveCustomerLink(order, customerId, requestFingerprint);
+  return customerId;
+}
+
+async function getProductLink(order: CommerceOrder, item: CommerceItem): Promise<ProductLink | null> {
+  const rows = await databaseJson(
+    `/rest/v1/conta_azul_product_links?select=*&source_platform=eq.${encodeURIComponent(order.sourcePlatform)}&source_product_id=eq.${encodeURIComponent(item.sourceId)}&limit=1`,
+    { method: "GET" },
+  ) as ProductLink[];
+  return rows[0] ?? null;
+}
+
+async function saveProductLink(
+  order: CommerceOrder,
+  item: CommerceItem,
+  productId: string,
+  sku: string,
+  requestFingerprint: string,
+): Promise<void> {
+  await databaseJson(
+    "/rest/v1/conta_azul_product_links?on_conflict=source_platform,source_product_id",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        prefer: "resolution=merge-duplicates,return=minimal",
+      },
+      body: JSON.stringify({
+        source_platform: order.sourcePlatform,
+        source_product_id: item.sourceId,
+        conta_azul_product_id: productId,
+        conta_azul_sku: sku,
+        request_fingerprint: requestFingerprint,
+        updated_at: new Date().toISOString(),
+      }),
+    },
+  );
+}
+
+async function ensureProduct(order: CommerceOrder, item: CommerceItem): Promise<string> {
+  const product = buildContaAzulProduct(item);
+  const requestFingerprint = await fingerprint(product);
+  const linked = await getProductLink(order, item);
+  if (linked) {
+    if (linked.request_fingerprint !== requestFingerprint) {
+      await contaAzulJson(`/v1/produtos/${encodeURIComponent(linked.conta_azul_product_id)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          codigo_sku: linked.conta_azul_sku,
+          nome: item.name.slice(0, 100),
+          valor_venda: item.unitAmount,
+        }),
+      }, "product update");
+      await saveProductLink(order, item, linked.conta_azul_product_id, linked.conta_azul_sku, requestFingerprint);
+    }
+    return linked.conta_azul_product_id;
+  }
+
+  const sku = contaAzulSku(item.sourceId);
+  const search = await contaAzulJson(
+    `/v1/produtos?pagina=1&tamanho_pagina=10&status=ATIVO&sku=${encodeURIComponent(sku)}`,
+    { method: "GET" },
+    "product lookup",
+  );
+  const matches = arrayFrom(search.value).map(stringId).filter((id): id is string => Boolean(id));
+  if (matches.length > 1) throw new Error("Conta Azul product lookup returned multiple matches");
+  let productId: string | null = matches[0] ?? null;
+  if (!productId) {
+    const created = await contaAzulJson("/v1/produtos", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(product),
+    }, "product creation");
+    productId = stringId(created.value);
+  }
+  if (!productId) throw new Error("Conta Azul product operation returned no identifier");
+  await saveProductLink(order, item, productId, sku, requestFingerprint);
+  return productId;
+}
+
+function saleDetails(value: unknown): SaleDetails | null {
+  const wrapper = object(value);
+  const sale = object(wrapper?.venda) ?? wrapper;
+  const id = stringId(sale) ?? stringId(wrapper);
+  if (!id) return null;
+  const situationValue = sale?.situacao;
+  const situation = typeof situationValue === "string"
+    ? situationValue
+    : typeof object(situationValue)?.nome === "string"
+    ? String(object(situationValue)?.nome)
+    : null;
+  const financialEvent = object(wrapper?.evento_financeiro) ?? object(sale?.evento_financeiro);
+  return {
+    id,
+    version: numberValue(sale?.versao),
+    situation,
+    financialEventId: stringId(financialEvent),
+    observations: typeof sale?.observacoes === "string" ? sale.observacoes : null,
+  };
+}
+
+async function getSaleDetails(id: string): Promise<SaleDetails> {
+  const response = await contaAzulJson(`/v1/venda/${encodeURIComponent(id)}`, { method: "GET" }, "sale lookup");
+  const details = saleDetails(response.value);
+  if (!details) throw new Error("Conta Azul sale lookup returned no identifier");
+  return details;
+}
+
+async function findSaleByNumber(saleNumber: number, externalOrderId: string): Promise<SaleDetails | null> {
+  const query = new URLSearchParams({ pagina: "1", tamanho_pagina: "10", numeros: String(saleNumber) });
+  const response = await contaAzulJson(`/v1/venda/busca?${query}`, { method: "GET" }, "sale number lookup");
+  for (const item of arrayFrom(response.value)) {
+    const wrapper = object(item);
+    const sale = object(wrapper?.venda) ?? wrapper;
+    if (Number(sale?.numero) !== saleNumber) continue;
+    const summary = saleDetails(item);
+    if (!summary) continue;
+    const details = summary.observations ? summary : await getSaleDetails(summary.id);
+    if (details.observations?.includes(`ordem ${externalOrderId}`)) return details;
+    throw new SaleNumberCollisionError(`Conta Azul sale number ${saleNumber} belongs to another sale`);
   }
   return null;
 }
 
-async function createSaleLink(
-  webhookId: string,
-  saleId: string,
-  fingerprint: string,
-  saleNumber: unknown,
-): Promise<void> {
-  const response = await databaseRequest("/rest/v1/conta_azul_sale_links", {
-    method: "POST",
-    headers: { "content-type": "application/json", prefer: "return=minimal" },
-    body: JSON.stringify({
-      webhook_id: webhookId,
-      conta_azul_sale_id: saleId,
-      request_fingerprint: fingerprint,
-      sale_number: saleNumber === undefined || saleNumber === null ? null : String(saleNumber),
-    }),
-  });
-  if (!response.ok && response.status !== 409) {
-    throw new Error(`Unable to persist Conta Azul sale link (${response.status})`);
+async function nextSaleNumber(): Promise<number> {
+  const response = await contaAzulJson("/v1/venda/proximo-numero", { method: "GET" }, "next sale number lookup");
+  const saleNumber = numberValue(response.value);
+  if (!saleNumber || !Number.isSafeInteger(saleNumber) || saleNumber < 1) {
+    throw new Error("Conta Azul returned an invalid next sale number");
   }
+  return saleNumber;
+}
+
+async function allocateSaleNumber(orderRow: OrderRow): Promise<{ row: OrderRow; number: number }> {
+  if (orderRow.conta_azul_sale_number) return { row: orderRow, number: orderRow.conta_azul_sale_number };
+  const saleNumber = await nextSaleNumber();
+  return { row: await patchOrder(orderRow.id, { conta_azul_sale_number: saleNumber, last_action: "syncing" }), number: saleNumber };
+}
+
+async function listFinancialInstallments(financialEventId: string): Promise<JsonObject[]> {
+  const response = await contaAzulJson(
+    `/v1/financeiro/eventos-financeiros/${encodeURIComponent(financialEventId)}/parcelas`,
+    { method: "GET" },
+    "financial installments lookup",
+  );
+  return arrayFrom(response.value).map(object).filter((item): item is JsonObject => Boolean(item));
+}
+
+async function existingSettlements(installmentId: string): Promise<JsonObject[]> {
+  const response = await contaAzulJson(
+    `/v1/financeiro/eventos-financeiros/parcelas/${encodeURIComponent(installmentId)}/baixa`,
+    { method: "GET" },
+    "settlement lookup",
+    [404],
+  );
+  return response.status === 404
+    ? []
+    : arrayFrom(response.value).map(object).filter((item): item is JsonObject => Boolean(item));
+}
+
+async function ensureSaleSettled(
+  details: SaleDetails,
+  order: CommerceOrder,
+  financialAccountId: string,
+): Promise<number | null> {
+  const refreshed = details.financialEventId ? details : await getSaleDetails(details.id);
+  if (!refreshed.financialEventId) {
+    throw new Error("Conta Azul sale returned no financial event for settlement");
+  }
+  const installments = await listFinancialInstallments(refreshed.financialEventId);
+  if (installments.length === 0) throw new Error("Conta Azul sale returned no financial installments");
+  let latestStatus: number | null = null;
+  for (const installment of installments) {
+    const installmentId = stringId(installment);
+    if (!installmentId) throw new Error("Conta Azul installment returned no identifier");
+    if ((await existingSettlements(installmentId)).length > 0) continue;
+    const gross = numberValue(installment.valor)
+      ?? numberValue(object(installment.detalhe_valor)?.valor_bruto)
+      ?? order.totalAmount / installments.length;
+    const response = await contaAzulJson(
+      `/v1/financeiro/eventos-financeiros/parcelas/${encodeURIComponent(installmentId)}/baixa`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          data_pagamento: order.sourceUpdatedAt.slice(0, 10),
+          composicao_valor: {
+            multa: 0,
+            juros: 0,
+            valor_bruto: gross,
+            desconto: 0,
+            taxa: order.feeAmount ?? 0,
+            valor_liquido: order.netAmount ?? gross,
+          },
+          conta_financeira: financialAccountId,
+          metodo_pagamento: contaAzulPaymentMethod(order),
+          observacao: `HumanOS | ordem ${order.externalOrderId}`,
+          nsu: order.externalOrderId,
+        }),
+      },
+      "settlement creation",
+    );
+    latestStatus = response.status;
+  }
+  return latestStatus;
+}
+
+async function reverseSaleSettlements(details: SaleDetails): Promise<number | null> {
+  const refreshed = details.financialEventId ? details : await getSaleDetails(details.id);
+  if (!refreshed.financialEventId) return null;
+  const installments = await listFinancialInstallments(refreshed.financialEventId);
+  let latestStatus: number | null = null;
+  for (const installment of installments) {
+    const installmentId = stringId(installment);
+    if (!installmentId) continue;
+    for (const settlement of await existingSettlements(installmentId)) {
+      const settlementId = stringId(settlement);
+      if (!settlementId) continue;
+      const response = await contaAzulJson(
+        `/v1/financeiro/eventos-financeiros/parcelas/baixa/${encodeURIComponent(settlementId)}`,
+        { method: "DELETE" },
+        "settlement reversal",
+        [404],
+      );
+      latestStatus = response.status;
+    }
+  }
+  return latestStatus;
 }
 
 async function complete(job: ClaimedJob, status: number | null): Promise<void> {
@@ -119,59 +680,179 @@ async function complete(job: ClaimedJob, status: number | null): Promise<void> {
 
 async function fail(job: ClaimedJob, error: unknown): Promise<void> {
   const message = error instanceof Error ? error.message : "unknown error";
-  const statusMatch = message.match(/Conta Azul sale creation failed \((\d{3})\)/);
+  const httpStatus = error instanceof ContaAzulHttpError ? error.status : null;
+  const mappingError = /mapping|Webhook body|requires at least one item|invalid amount/i.test(message);
+  const platformError = /platform|financial account/i.test(message);
   await rpc("fail_integration_job", {
     p_destination: "conta_azul",
     p_message_id: job.message_id,
     p_webhook_id: job.webhook_id,
     p_attempt_number: job.attempt_number,
     p_started_at: job.processing_started_at,
-    p_http_status: statusMatch ? Number(statusMatch[1]) : null,
-    p_error_code: message.startsWith("Conta Azul mapping") || message.startsWith("Webhook body")
+    p_http_status: httpStatus,
+    p_error_code: mappingError
       ? "mapping_incomplete"
+      : platformError
+      ? "platform_account_unmapped"
       : "delivery_failed",
     p_error_message: message,
   });
 }
 
-async function processJob(job: ClaimedJob): Promise<"created" | "already_created"> {
-  if (await existingSaleId(job.webhook_id)) {
-    await complete(job, 200);
-    return "already_created";
-  }
-
-  const sale = mapWebhookToContaAzulSale(job.body_json);
-  const serialized = JSON.stringify(sale);
-  const fingerprint = await sha256Hex(new TextEncoder().encode(serialized));
-  const recoveredSaleId = await findSaleByNumber(sale.numero);
-  if (recoveredSaleId) {
-    await createSaleLink(job.webhook_id, recoveredSaleId, fingerprint, sale.numero);
-    await complete(job, 200);
-    return "already_created";
-  }
-  const response = await rateLimitedContaAzulRequest("/v1/venda", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: serialized,
+async function finalizeOrder(
+  job: ClaimedJob,
+  orderRow: OrderRow,
+  order: CommerceOrder,
+  action: string,
+  httpStatus: number | null,
+  extra: JsonObject = {},
+): Promise<OrderRow> {
+  const updated = await patchOrder(orderRow.id, {
+    source_customer_id: order.customer.sourceId,
+    current_source_status: order.sourceStatus,
+    normalized_status: order.normalizedStatus,
+    last_webhook_id: job.webhook_id,
+    last_ingest_sequence: job.ingest_sequence,
+    last_source_updated_at: order.sourceUpdatedAt,
+    payload_fingerprint: job.body_sha256,
+    last_action: action,
+    last_synced_at: new Date().toISOString(),
+    ...extra,
   });
-  const raw = await response.text();
-  if (!response.ok) {
-    throw new Error(`Conta Azul sale creation failed (${response.status}): ${raw.slice(0, 1000)}`);
-  }
-  let decoded: unknown = raw;
-  try {
-    decoded = raw ? JSON.parse(raw) : null;
-  } catch {
-    // Some successful API responses may return a plain identifier.
-  }
-  const saleId = saleIdFromResponse(decoded)
-    ?? response.headers.get("location")?.split("/").filter(Boolean).at(-1)
-    ?? null;
-  if (!saleId) throw new Error("Conta Azul created a sale but did not return its identifier");
+  await recordOrderEvent(job, updated, order, action, httpStatus);
+  await complete(job, httpStatus);
+  return updated;
+}
 
-  await createSaleLink(job.webhook_id, saleId, fingerprint, sale.numero);
-  await complete(job, response.status);
-  return "created";
+async function processJob(
+  job: ClaimedJob,
+): Promise<"created" | "updated" | "recorded" | "no_change"> {
+  if (await getOrderEvent(job.webhook_id) || await getDeferredEvent(job.webhook_id)) {
+    await complete(job, 200);
+    return "no_change";
+  }
+
+  const inbound = classifyInboundCommerceEvent(job.body_json, job.source_platform);
+  if (inbound.disposition === "defer") {
+    await deferEvent(job, inbound);
+    await complete(job, 200);
+    return "recorded";
+  }
+
+  const order = parseZoutiOrder(job.body_json, job.source_platform);
+  let orderRow = await getOrder(order.sourcePlatform, order.externalOrderId);
+  if (!orderRow) orderRow = await insertOrder(job, order);
+  const transition = classifyOrderTransition({
+    lastIngestSequence: orderRow.last_ingest_sequence,
+    lastSourceUpdatedAt: orderRow.last_source_updated_at,
+    payloadFingerprint: orderRow.payload_fingerprint,
+    normalizedStatus: orderRow.normalized_status,
+    lastAction: orderRow.last_action,
+  }, order, job.ingest_sequence, job.body_sha256);
+  if (transition !== "apply") {
+    await recordOrderEvent(job, orderRow, order, transition, 200);
+    await complete(job, 200);
+    return "no_change";
+  }
+
+  const action = desiredOrderAction(order.normalizedStatus, Boolean(orderRow.conta_azul_sale_id));
+  if (action === "record_only") {
+    await finalizeOrder(job, orderRow, order, `recorded_${order.normalizedStatus}`, 200);
+    return "recorded";
+  }
+
+  const mapping = await resolvePlatformMapping(order);
+  let allocated = await allocateSaleNumber(orderRow);
+  orderRow = allocated.row;
+  let details: SaleDetails | null;
+  if (orderRow.conta_azul_sale_id) {
+    details = await getSaleDetails(orderRow.conta_azul_sale_id);
+  } else {
+    try {
+      details = await findSaleByNumber(allocated.number, order.externalOrderId);
+    } catch (error) {
+      if (!(error instanceof SaleNumberCollisionError)) throw error;
+      const replacement = await nextSaleNumber();
+      if (replacement === allocated.number) throw error;
+      orderRow = await patchOrder(orderRow.id, {
+        conta_azul_sale_number: replacement,
+        last_action: "sale_number_reallocated",
+      });
+      allocated = { row: orderRow, number: replacement };
+      details = await findSaleByNumber(allocated.number, order.externalOrderId);
+    }
+  }
+
+  if (action === "cancel_sale" && !details) {
+    await finalizeOrder(job, orderRow, order, "cancel_without_sale", 200);
+    return "recorded";
+  }
+
+  const customerId = await ensureCustomer(order);
+  const productIds: string[] = [];
+  for (const item of order.items) productIds.push(await ensureProduct(order, item));
+  const salePayload = buildContaAzulSale(order, {
+    customerId,
+    productIds,
+    saleNumber: allocated.number,
+    financialAccountId: mapping.financial_account_id!,
+    categoryId: mapping.category_id,
+    situation: action === "cancel_sale" ? "CANCELADO" : "APROVADO",
+    version: details?.version,
+  });
+
+  let httpStatus: number | null = null;
+  let result: "created" | "updated" = details ? "updated" : "created";
+  if (!details) {
+    const response = await contaAzulJson("/v1/venda", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(salePayload),
+    }, "sale creation");
+    details = saleDetails(response.value);
+    if (!details) throw new Error("Conta Azul sale creation returned no identifier");
+    httpStatus = response.status;
+    orderRow = await patchOrder(orderRow.id, {
+      conta_azul_customer_id: customerId,
+      conta_azul_sale_id: details.id,
+      conta_azul_sale_version: details.version,
+      financial_account_id: mapping.financial_account_id,
+      category_id: mapping.category_id,
+      last_action: "sale_created_settlement_pending",
+    });
+    details = await getSaleDetails(details.id);
+  } else {
+    if (action === "cancel_sale") await reverseSaleSettlements(details);
+    const refreshed = await getSaleDetails(details.id);
+    const updatePayload = buildContaAzulSale(order, {
+      customerId,
+      productIds,
+      saleNumber: allocated.number,
+      financialAccountId: mapping.financial_account_id!,
+      categoryId: mapping.category_id,
+      situation: action === "cancel_sale" ? "CANCELADO" : "APROVADO",
+      version: refreshed.version,
+    });
+    const response = await contaAzulJson(`/v1/venda/${encodeURIComponent(details.id)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(updatePayload),
+    }, "sale update");
+    httpStatus = response.status;
+    details = await getSaleDetails(details.id);
+  }
+
+  if (action === "upsert_sale") {
+    httpStatus = (await ensureSaleSettled(details, order, mapping.financial_account_id!)) ?? httpStatus;
+  }
+  await finalizeOrder(job, orderRow, order, action === "cancel_sale" ? "sale_cancelled" : `sale_${result}`, httpStatus, {
+    conta_azul_customer_id: customerId,
+    conta_azul_sale_id: details.id,
+    conta_azul_sale_version: details.version,
+    financial_account_id: mapping.financial_account_id,
+    category_id: mapping.category_id,
+  });
+  return result;
 }
 
 Deno.serve(async (request: Request): Promise<Response> => {
@@ -196,10 +877,8 @@ Deno.serve(async (request: Request): Promise<Response> => {
       const input = await request.json().catch(() => ({})) as { batch_size?: unknown };
       const requested = Number(input.batch_size ?? 100);
       const batchSize = Number.isSafeInteger(requested) ? Math.min(Math.max(requested, 1), 300) : 100;
-      const result = { claimed: 0, created: 0, already_created: 0, failed: 0 };
+      const result = { claimed: 0, created: 0, updated: 0, recorded: 0, no_change: 0, failed: 0 };
 
-      // Claim one item at a time. A failed purchase blocks any newer refund
-      // until the purchase succeeds or reaches dead-letter.
       for (let index = 0; index < batchSize; index += 1) {
         const jobs = await rpc("claim_integration_jobs", {
           p_destination: "conta_azul",
@@ -208,7 +887,6 @@ Deno.serve(async (request: Request): Promise<Response> => {
         const job = jobs[0];
         if (!job) break;
         result.claimed += 1;
-
         try {
           result[await processJob(job)] += 1;
         } catch (error) {

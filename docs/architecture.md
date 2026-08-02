@@ -67,10 +67,16 @@ idempotência no destino sempre que a API permitir: nenhum sistema distribuído
 consegue impedir uma duplicação se o terceiro executar a chamada e a conexão cair
 antes do ACK local.
 
-No caso da Conta Azul, o número da venda é a chave operacional de recuperação.
-Antes do `POST`, o worker consulta `/v1/venda/busca?numeros=...`. Assim, uma
-reexecução após perda do ACK recupera o UUID da venda já criada em vez de criar
-outra. O vínculo local por `webhook_id`, fingerprint e número mantém a auditoria.
+No caso da Conta Azul, a identidade é `(source_platform, external_order_id)` e o
+número da venda é a chave operacional de recuperação. Antes do `POST`, o worker
+consulta `/v1/venda/busca?numeros=...` e confirma o ID externo nas observações.
+Assim, uma reexecução após perda do ACK recupera o UUID da venda já criada; se o
+número tiver sido ocupado por outra venda, ele é realocado. O vínculo local por
+ordem, `webhook_id`, fingerprint, número e UUID mantém a auditoria.
+
+Eventos Zouti auxiliares e plataformas ainda sem adaptador são confirmados na
+fila somente depois de serem gravados em `conta_azul_deferred_events`. Isso evita
+que bloqueiem o FIFO sem descartá-los ou interpretá-los como novas vendas.
 
 ## Concorrência dos workers
 

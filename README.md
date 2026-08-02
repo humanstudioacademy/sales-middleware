@@ -6,9 +6,9 @@ mesma transação, um item durável para Conta Azul e outro para humanOS.
 
 Os disparos externos ficam desligados por padrão. A aplicação de produção
 `HumanOS` está conectada à Conta Azul por OAuth, com renovação atômica de tokens,
-cliente de leitura/criação de vendas e worker. A leitura da API de produção foi
-validada; os eventos só serão enviados depois da confirmação do mapeamento Zolt
-e da ativação explícita de `dispatch_enabled`.
+cliente administrativo e worker. O mapeamento Zouti foi validado contra eventos
+reais e a conta financeira `Zouti - Conta Corrente`; os eventos só serão enviados
+depois de uma ativação explícita de `dispatch_enabled`.
 
 ## Endpoint de produção
 
@@ -157,10 +157,12 @@ Endpoint administrativo de homologação. `GET` encaminha filtros para
 ### `POST /functions/v1/conta-azul-worker`
 
 Worker protegido por `CRON_SECRET` (ou pelo segredo administrativo). Apenas uma
-execução obtém o lease por vez. Para cada item ele busca antes pelo número da
-venda, recupera uma criação cujo ACK tenha se perdido, cria quando necessário e
-então confirma a mensagem. A cadência é serial para respeitar o limite oficial
-da Conta Azul de 10 requisições/s e 600/min por conta ERP.
+execução obtém o lease por vez. Para cada pedido ele correlaciona a identidade
+externa, cliente, produtos, venda e financeiro. Antes de criar, busca pelo número
+reservado e confirma o ID da ordem nas observações; colisões recebem outro número.
+Assim, um ACK perdido não transforma o mesmo pedido em outra venda. A cadência é
+serial para respeitar o limite oficial da Conta Azul de 10 requisições/s e
+600/min por conta ERP.
 
 ## Estrutura
 
@@ -177,7 +179,9 @@ supabase/
 │   ├── 20260802060000_add_ordered_processing_ledger.sql
 │   ├── 20260802070000_quarantine_production_load_tests.sql
 │   ├── 20260802080000_quarantine_ingress_validation_receipts.sql
-│   └── 20260802090000_quarantine_binary_capture_validation.sql
+│   ├── 20260802090000_quarantine_binary_capture_validation.sql
+│   ├── 20260802100000_create_conta_azul_order_sync.sql
+│   └── 20260802110000_add_deferred_event_status.sql
 └── functions/
     ├── _shared/
     ├── conta-azul-api/
@@ -268,25 +272,28 @@ Os recibos desses ensaios continuam imutáveis na inbox. Seus itens de fila,
 identificados pela plataforma `load_test*`, foram arquivados como dead-letter
 operacional para nunca serem enviados aos sistemas reais nem bloquearem o FIFO.
 
-## Contrato Zolt → Conta Azul
+## Contrato Zouti → Conta Azul
 
-Até termos um payload real da Zolt, o worker aceita somente um objeto de venda
-que já siga o contrato oficial da Conta Azul. Ele pode estar na raiz, em
-`conta_azul_sale` ou em `data.conta_azul_sale`. Campos mínimos:
+O adaptador reconhece como pedido canônico o objeto Zouti cujo `id` começa com
+`ord_` e contém `status`, `customer` e `items`. A identidade operacional é o par
+`(plataforma, id da ordem)`, não o webhook: reenvios e mudanças posteriores
+atualizam a mesma venda.
 
-```json
-{
-  "id_cliente": "uuid",
-  "numero": 1001,
-  "situacao": "EM_ANDAMENTO",
-  "data_venda": "2026-08-02",
-  "itens": [{ "id": "uuid", "quantidade": 1, "valor": 10 }]
-}
-```
+- `PAID` cria ou atualiza cliente, produtos e venda aprovada, e registra a baixa;
+- `AWAITING_PAYMENT` e estados recusados são auditados sem criar venda;
+- `REFUNDED`, `CANCELLED` e `DISPUTED` desfazem a baixa e cancelam a venda já
+  vinculada;
+- uma reversão terminal não pode regredir; `DISPUTED` tem precedência sobre
+  `REFUNDED` quando chegar depois;
+- pagamento (`pmt_`), assinatura (`sub_`), parcela (`smi_`), solicitação de
+  reembolso (`rrq_`) e plataformas sem adaptador ficam em
+  `conta_azul_deferred_events`, com vínculo à ordem quando disponível. Eles não
+  criam vendas e podem ser reprocessados após a implementação do correlacionador.
 
-Payload incompleto é rejeitado antes de qualquer chamada externa e entra no
-fluxo normal de retry/dead-letter. O mapeador definitivo deve ser ajustado com
-uma amostra real, sem alterar a inbox já armazenada.
+Cliente é correlacionado pelo ID da origem e localizado por CPF/CNPJ ou e-mail.
+Produto é correlacionado pelo ID da origem e por um SKU determinístico. A venda
+guarda número, UUID, versão, conta financeira, categoria, fingerprint e a última
+sequência processada. Toda decisão fica em auditoria append-only.
 
 Referências oficiais: [autenticação OAuth](https://developers.contaazul.com/auth),
 [renovação do token](https://developers.contaazul.com/renewingaccesstoken) e
@@ -302,11 +309,7 @@ Os workers usarão estas RPCs internas, disponíveis apenas para `service_role`:
 - `fail_integration_job`: agenda retry exponencial ou move para dead-letter;
 - `middleware_queue_status`: produz o resumo seguro usado pelo endpoint.
 
-Antes de ativar o despacho Conta Azul em produção, ainda precisamos confirmar:
-
-- objeto criado/atualizado (venda, cliente, produto, financeiro etc.);
-- uma criação controlada bem-sucedida;
-- mapeamento do payload real da Zolt para o contrato acima.
-
-Já concluído: aplicação de produção `HumanOS`, callback OAuth, armazenamento
-criptografado dos tokens e consulta real de vendas com resposta HTTP 200.
+Antes de ativar o despacho Conta Azul em produção ainda é obrigatória uma criação
+controlada, seguida da conferência da venda e da baixa na interface. Já concluído:
+aplicação de produção `HumanOS`, callback OAuth, tokens criptografados, consultas
+reais, conta/categoria Zouti e mapeamento dos formatos recebidos.
