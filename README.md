@@ -12,7 +12,14 @@ e da ativação explícita de `dispatch_enabled`.
 
 ## Endpoint de produção
 
-O receptor público e durável dos webhooks da Zolt é:
+O endereço público no domínio da Human Academy é:
+
+```text
+https://mid.humanacademy.ai/webhook
+```
+
+Ele encaminha o request integral para o receptor durável no Supabase. O endereço
+direto, com uma etapa a menos e recomendado como fallback, é:
 
 ```text
 https://hyvomeibqlfchxqaevkc.supabase.co/functions/v1/zolt-webhook
@@ -20,8 +27,7 @@ https://hyvomeibqlfchxqaevkc.supabase.co/functions/v1/zolt-webhook
 
 Use `POST` e envie o segredo em `Authorization: Bearer <ZOLT_WEBHOOK_SECRET>`.
 Esse endereço aponta diretamente para a Edge Function que persiste inbox e
-filas na mesma transação. Um proxy no Vercel não deve ficar na frente desse
-endpoint, pois acrescentaria uma etapa que poderia falhar antes do armazenamento.
+filas na mesma transação. Ambos usam `POST` e a mesma autenticação.
 
 O endereço de descoberta e saúde publicado no Vercel é
 `https://mid.humanacademy.ai`. Ele retorna a URL canônica de ingestão e o

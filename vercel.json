@@ -2,6 +2,10 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
     {
+      "source": "/webhook",
+      "destination": "https://hyvomeibqlfchxqaevkc.supabase.co/functions/v1/zolt-webhook"
+    },
+    {
       "source": "/",
       "destination": "/api"
     }
