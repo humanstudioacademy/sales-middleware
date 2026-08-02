@@ -11,6 +11,7 @@ import {
   isCancelledSaleSituation,
   normalizeOrderStatus,
   parseZoutiOrder,
+  reconcileCustomerMatchIds,
   saleObservationsBelongToOrder,
 } from "../supabase/functions/_shared/zouti-order.ts";
 
@@ -25,6 +26,15 @@ test("recognizes the durable Zouti order marker in Conta Azul observations", () 
   assert.equal(saleObservationsBelongToOrder("Pedido Zouti: ord_123", "ord_123"), true);
   assert.equal(saleObservationsBelongToOrder("HumanOS | ordem ord_123", "ord_123"), true);
   assert.equal(saleObservationsBelongToOrder("Pedido Zouti: ord_other", "ord_123"), false);
+});
+
+test("reconciles customer matches across document, email and phone", () => {
+  assert.equal(reconcileCustomerMatchIds([["person-1"], ["person-1"], []]), "person-1");
+  assert.equal(reconcileCustomerMatchIds([[], [], []]), null);
+  assert.throws(
+    () => reconcileCustomerMatchIds([["person-1"], ["person-2"], []]),
+    /identity conflict/,
+  );
 });
 
 const paidPayload = {

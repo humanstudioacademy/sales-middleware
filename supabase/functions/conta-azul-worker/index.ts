@@ -13,6 +13,7 @@ import {
   desiredOrderAction,
   isCancelledSaleSituation,
   parseZoutiOrder,
+  reconcileCustomerMatchIds,
   saleObservationsBelongToOrder,
 } from "../_shared/zouti-order.ts";
 
@@ -455,15 +456,26 @@ async function ensureCustomer(order: CommerceOrder): Promise<string> {
     return linked.conta_azul_customer_id;
   }
 
-  const query = new URLSearchParams({ pagina: "1", tamanho_pagina: "10", tipo_perfil: "Cliente" });
-  if (order.customer.document) query.set("documentos", order.customer.document);
-  else if (order.customer.email) query.set("emails", order.customer.email);
-  else throw new Error("Conta Azul customer mapping requires a document or email");
-  const search = await contaAzulJson(`/v1/pessoas?${query}`, { method: "GET" }, "customer lookup");
-  const matches = arrayFrom(search.value).map(stringId).filter((id): id is string => Boolean(id));
-  if (matches.length > 1) throw new Error("Conta Azul customer lookup returned multiple matches");
+  const identifiers: Array<["documentos" | "emails" | "telefones", string]> = [];
+  if (order.customer.document) identifiers.push(["documentos", order.customer.document]);
+  if (order.customer.email) identifiers.push(["emails", order.customer.email]);
+  if (order.customer.phone) identifiers.push(["telefones", order.customer.phone]);
 
-  let customerId: string | null = matches[0] ?? null;
+  const matchGroups: string[][] = [];
+  for (const [field, value] of identifiers) {
+    const query = new URLSearchParams({
+      pagina: "1",
+      tamanho_pagina: "10",
+      tipo_perfil: "Cliente",
+      [field]: value,
+    });
+    const search = await contaAzulJson(`/v1/pessoas?${query}`, { method: "GET" }, `customer lookup by ${field}`);
+    const matches = arrayFrom(search.value).map(stringId).filter((id): id is string => Boolean(id));
+    if (matches.length > 1) throw new Error(`Conta Azul customer lookup by ${field} returned multiple matches`);
+    matchGroups.push(matches);
+  }
+
+  let customerId: string | null = reconcileCustomerMatchIds(matchGroups);
   if (!customerId) {
     const created = await contaAzulJson("/v1/pessoas", {
       method: "POST",

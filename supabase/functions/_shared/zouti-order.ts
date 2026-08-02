@@ -387,6 +387,14 @@ export function saleObservationsBelongToOrder(
     || observations.includes(`ordem ${externalOrderId}`);
 }
 
+export function reconcileCustomerMatchIds(matchGroups: string[][]): string | null {
+  const uniqueIds = [...new Set(matchGroups.flat())];
+  if (uniqueIds.length > 1) {
+    throw new Error("Conta Azul customer identity conflict across document, email or phone");
+  }
+  return uniqueIds[0] ?? null;
+}
+
 export function contaAzulPaymentMethod(order: CommerceOrder): string {
   if (order.splitPayments.length > 1) return "OUTRO";
   const method = order.paymentMethod ?? order.splitPayments[0]?.method ?? "OUTRO";
