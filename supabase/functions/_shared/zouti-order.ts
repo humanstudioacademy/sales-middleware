@@ -374,6 +374,10 @@ export function desiredOrderAction(
   return "record_only";
 }
 
+export function isCancelledSaleSituation(value: string | null | undefined): boolean {
+  return value?.trim().toUpperCase() === "CANCELADO";
+}
+
 export function contaAzulPaymentMethod(order: CommerceOrder): string {
   if (order.splitPayments.length > 1) return "OUTRO";
   const method = order.paymentMethod ?? order.splitPayments[0]?.method ?? "OUTRO";

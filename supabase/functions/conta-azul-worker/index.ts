@@ -11,6 +11,7 @@ import {
   type CommerceItem,
   type CommerceOrder,
   desiredOrderAction,
+  isCancelledSaleSituation,
   parseZoutiOrder,
 } from "../_shared/zouti-order.ts";
 
@@ -793,6 +794,19 @@ async function processJob(
   if (action === "cancel_sale" && !details) {
     await finalizeOrder(job, orderRow, order, "cancel_without_sale", 200);
     return "recorded";
+  }
+
+  // Conta Azul rejects every PUT against an already cancelled sale. Treat a
+  // repeated cancellation/refund/chargeback as an idempotent success while
+  // still recording the newer source event and its strict ingest position.
+  if (action === "cancel_sale" && details && isCancelledSaleSituation(details.situation)) {
+    await finalizeOrder(job, orderRow, order, "sale_already_cancelled", 200, {
+      conta_azul_sale_id: details.id,
+      conta_azul_sale_version: details.version,
+      financial_account_id: mapping.financial_account_id,
+      category_id: mapping.category_id,
+    });
+    return "no_change";
   }
 
   const customerId = await ensureCustomer(order);

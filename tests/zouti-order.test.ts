@@ -8,9 +8,17 @@ import {
   classifyInboundCommerceEvent,
   contaAzulPaymentMethod,
   desiredOrderAction,
+  isCancelledSaleSituation,
   normalizeOrderStatus,
   parseZoutiOrder,
 } from "../supabase/functions/_shared/zouti-order.ts";
+
+test("recognizes an already cancelled Conta Azul sale idempotently", () => {
+  assert.equal(isCancelledSaleSituation("CANCELADO"), true);
+  assert.equal(isCancelledSaleSituation(" cancelado "), true);
+  assert.equal(isCancelledSaleSituation("APROVADO"), false);
+  assert.equal(isCancelledSaleSituation(null), false);
+});
 
 const paidPayload = {
   id: "ord_example_123",
