@@ -11,6 +11,17 @@ interface ClaimedJob {
   body_json: unknown;
 }
 
+let lastUpstreamCallAt = 0;
+
+async function rateLimitedContaAzulRequest(path: string, init: RequestInit = {}): Promise<Response> {
+  const waitMilliseconds = Math.max(0, 125 - (Date.now() - lastUpstreamCallAt));
+  if (waitMilliseconds > 0) {
+    await new Promise((resolve) => setTimeout(resolve, waitMilliseconds));
+  }
+  lastUpstreamCallAt = Date.now();
+  return await contaAzulRequest(path, init);
+}
+
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store" } });
 }
@@ -55,7 +66,7 @@ async function findSaleByNumber(saleNumber: unknown): Promise<string | null> {
     tamanho_pagina: "10",
     numeros: String(parsed),
   });
-  const response = await contaAzulRequest(`/v1/venda/busca?${query}`);
+  const response = await rateLimitedContaAzulRequest(`/v1/venda/busca?${query}`);
   const raw = await response.text();
   if (!response.ok) {
     throw new Error(`Conta Azul sale lookup failed (${response.status}): ${raw.slice(0, 1000)}`);
@@ -136,7 +147,7 @@ async function processJob(job: ClaimedJob): Promise<"created" | "already_created
     await complete(job, 200);
     return "already_created";
   }
-  const response = await contaAzulRequest("/v1/venda", {
+  const response = await rateLimitedContaAzulRequest("/v1/venda", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: serialized,
@@ -191,7 +202,6 @@ Deno.serve(async (request: Request): Promise<Response> => {
 
       for (const job of jobs) {
         try {
-          await new Promise((resolve) => setTimeout(resolve, 125));
           result[await processJob(job)] += 1;
         } catch (error) {
           result.failed += 1;

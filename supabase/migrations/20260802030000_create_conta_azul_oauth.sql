@@ -278,7 +278,10 @@ declare
 begin
   update public.conta_azul_connections
   set
-    status = 'error',
+    status = case
+      when p_error_code = 'token_refresh_terminal' then 'error'
+      else 'active'
+    end,
     refresh_lease_token = null,
     refresh_lease_until = null,
     last_error_code = left(p_error_code, 200),

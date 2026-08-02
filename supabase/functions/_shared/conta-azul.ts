@@ -150,11 +150,13 @@ async function refreshAccessToken(connection: ContaAzulConnection): Promise<stri
     }
     return token.access_token;
   } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown error";
+    const terminal = /invalid_grant|invalid_client|unauthorized_client/i.test(message);
     await rpc("fail_conta_azul_token_refresh", {
       p_connection_id: connection.id,
       p_lease_token: leaseToken,
-      p_error_code: "token_refresh_failed",
-      p_error_message: error instanceof Error ? error.message : "unknown error",
+      p_error_code: terminal ? "token_refresh_terminal" : "token_refresh_transient",
+      p_error_message: message,
     }).catch(() => undefined);
     throw error;
   }

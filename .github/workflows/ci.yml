@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+      - run: npx --yes deno@2.5.0 check supabase/functions/conta-azul-auth/index.ts supabase/functions/conta-azul-api/index.ts supabase/functions/conta-azul-worker/index.ts supabase/functions/queue-status/index.ts supabase/functions/zolt-webhook/index.ts
