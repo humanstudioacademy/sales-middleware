@@ -13,7 +13,8 @@ O `INSERT` na `webhook_inbox` dispara um trigger no mesmo commit. O trigger:
 
 1. incrementa um contador distribuído em 64 shards;
 2. envia uma referência do webhook para `sales_conta_azul`;
-3. envia outra referência para `sales_human_os`.
+3. envia outra referência para `sales_human_os`;
+4. envia outra referência para `sales_student_portal`.
 
 Se qualquer operação falhar, o Postgres desfaz tudo. A Edge Function só recebe
 o recibo depois do commit e só então responde `200`.
@@ -78,6 +79,27 @@ Eventos Zouti auxiliares e plataformas ainda sem adaptador são confirmados na
 fila somente depois de serem gravados em `conta_azul_deferred_events`. Isso evita
 que bloqueiem o FIFO sem descartá-los ou interpretá-los como novas vendas.
 
+No portal do aluno, a identidade é `(source_platform, external_order_id,
+edition_code)`. A elegibilidade vem do produto vendido: um item da ordem precisa
+estar mapeado em `student_portal_offers` para uma edição ativa. A query `?event=`
+não participa dessa decisão, então uma URL cadastrada errada na Zouti não cria
+nem impede matrícula. Ofertas que apontam para edições diferentes na mesma ordem
+param o item com `mapping_incomplete` em vez de escolher uma edição no escuro.
+
+Vendas sem produto mapeado e eventos auxiliares são gravados em
+`student_portal_skipped_events` antes de confirmar a fila — nunca ficam
+pendentes bloqueando o FIFO. `student_portal_enrollment_events` é append-only e
+tem `webhook_id` como chave primária: se o ACK se perder depois da entrega, a
+reexecução encerra o item sem chamar o portal de novo.
+
+O portal expõe apenas `POST /functions/v1/matricula`, que cria matrícula. Não há
+endpoint de revogação, então uma reversão terminal grava
+`last_action = 'revoke_pending'` e mantém `access_state = 'granted'`. Falhar o
+item seria pior: o claim é FIFO estrito por destino, e um item que nunca sucede
+bloquearia todas as matrículas seguintes até esgotar as tentativas. O estado
+pendente fica consultável e a revogação é feita fora do middleware enquanto o
+endpoint não existir.
+
 ## Concorrência dos workers
 
 Cada destino possui configuração independente:
@@ -87,7 +109,7 @@ Cada destino possui configuração independente:
 - `visibility_timeout_seconds`: duração do lease;
 - `max_attempts`: limite antes de dead-letter.
 
-Nesta fase os dois destinos enfileiram, mas não despacham. O worker Conta Azul
+Nesta fase os três destinos enfileiram, mas não despacham. O worker Conta Azul
 usa um lease global para impedir duas execuções concorrentes e processa chamadas
 em série. Cada claim pega somente o menor `ingest_sequence` ativo. Se esse item
 entra em retry, o claim devolve vazio até o horário agendado; compra e reembolso
@@ -109,7 +131,11 @@ e tamanho.
 | Worker cai durante processamento | lease expira e mensagem reaparece |
 | Terceiro retorna erro temporário | retry exponencial independente |
 | Tentativas esgotadas | mensagem arquivada como dead-letter |
-| Conta Azul indisponível | fila humanOS continua independente |
+| Conta Azul indisponível | filas humanOS e portal do aluno continuam independentes |
+| Portal do aluno indisponível | retry exponencial isolado; venda e financeiro não são afetados |
+| Venda sem oferta AgentLab mapeada | registrada em `student_portal_skipped_events` e confirmada |
+| Ordem AgentLab sem e-mail | `mapping_incomplete`; nenhum aluno é criado sem identidade |
+| Reembolso sem endpoint de revogação | `revoke_pending` consultável; a fila não trava |
 | Dois crons Conta Azul simultâneos | somente um adquire o lease global |
 | Access token perto de expirar | um worker renova; os demais aguardam |
 | ACK de criação perdido | retry busca pelo número e recupera o UUID |
@@ -138,7 +164,7 @@ A taxa contínua é volumosa:
 
 - 100 eventos/s = 8.640.000 webhooks/dia;
 - 200 eventos/s = 17.280.000 webhooks/dia;
-- com dois destinos, 200 eventos/s cria 34.560.000 mensagens/dia antes do
+- com três destinos, 200 eventos/s cria 51.840.000 mensagens/dia antes do
   consumo.
 
 O tamanho real depende do body e dos headers. Antes de carga contínua em produção,

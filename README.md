@@ -2,7 +2,8 @@
 
 API de entrada e distribuição resiliente para integrações de vendas. O fluxo
 atual recebe webhooks públicos da Zolt, preserva cada entrega e cria, na
-mesma transação, um item durável para Conta Azul e outro para humanOS.
+mesma transação, um item durável para Conta Azul, outro para humanOS e outro
+para o portal do aluno.
 
 Os disparos externos ficam desligados por padrão. A aplicação de produção
 `HumanOS` está conectada à Conta Azul por OAuth, com renovação atômica de tokens,
@@ -56,11 +57,14 @@ flowchart LR
   T --> I["Inbox imutável e criptografada"]
   T --> C["Fila durável Conta Azul"]
   T --> H["Fila durável humanOS"]
+  T --> P["Fila durável portal do aluno"]
   C -.->|"worker serial + rate limit"| CA["Conta Azul"]
-  H -.->|"processador futuro"| HO["humanOS"]
+  H -.->|"replay byte a byte"| HO["humanOS"]
+  P -.->|"matrícula por edição"| PA["Portal do aluno"]
   S["Edge Function queue-status"] --> I
   S --> C
   S --> H
+  S --> P
 ```
 
 ## Garantias
@@ -179,6 +183,31 @@ funcionais são preservados; credenciais, cookies e headers de infraestrutura
 nunca são retransmitidos. Cada envio inclui chave idempotente, ID do webhook,
 sequência de ingestão e hash SHA-256 do body original.
 
+### `POST /functions/v1/student-portal-worker`
+
+Worker do portal do aluno, protegido pelo mesmo segredo administrativo. Ele lê o
+JSON da ordem, resolve a elegibilidade pelo produto vendido e chama o endpoint de
+matrícula configurado em `STUDENT_PORTAL_WEBHOOK_URL`, autenticando com
+`x-matricula-token: <STUDENT_PORTAL_MATRICULA_TOKEN>`.
+
+O corpo é exatamente o contrato do portal, sem campos extras:
+
+```json
+{
+  "email": "aluna@example.test",
+  "edicao": "agent-lab-3",
+  "nome": "Aluna Exemplo",
+  "origem": "zouti"
+}
+```
+
+O rastro viaja em headers, onde não interfere na validação do portal:
+`idempotency-key: student-portal-<webhook_id>`, `x-humanos-order-id`,
+`x-humanos-ingest-sequence` e o SHA-256 do body original.
+
+O e-mail é a chave do aluno no portal. Uma ordem sem e-mail para com
+`mapping_incomplete` em vez de matricular alguém sem identidade.
+
 O Vercel chama `/api/cron` a cada minuto. Cada execução tenta até 20 eventos
 Zouti por destino. A seleção é FIFO dentro da plataforma; eventos Hotmart
 permanecem pendentes até o adaptador Hotmart ser explicitamente implementado.
@@ -204,7 +233,8 @@ supabase/
 │   ├── 20260802120000_delete_production_test_events.sql
 │   ├── 20260802123000_support_conta_azul_service_links.sql
 │   ├── 20260802130000_claim_integration_jobs_by_platform.sql
-│   └── 20260802131000_add_human_os_worker_lease.sql
+│   ├── 20260802131000_add_human_os_worker_lease.sql
+│   └── 20260803000000_create_student_portal_destination.sql
 └── functions/
     ├── _shared/
     ├── conta-azul-api/
@@ -212,10 +242,12 @@ supabase/
     ├── conta-azul-worker/
     ├── human-os-worker/
     ├── queue-status/
+    ├── student-portal-worker/
     └── zolt-webhook/
 scripts/load-test.ts
 tests/
 ├── health.test.ts
+├── student-portal.test.ts
 └── webhook.test.ts
 ```
 
@@ -255,6 +287,7 @@ supabase db push
 supabase functions deploy zolt-webhook
 supabase functions deploy queue-status
 supabase functions deploy conta-azul-auth conta-azul-api conta-azul-worker
+supabase functions deploy human-os-worker student-portal-worker
 ```
 
 ## Desenvolvimento e validação
@@ -322,6 +355,52 @@ sequência processada. Toda decisão fica em auditoria append-only.
 Referências oficiais: [autenticação OAuth](https://developers.contaazul.com/auth),
 [renovação do token](https://developers.contaazul.com/renewingaccesstoken) e
 [API de vendas](https://developers.contaazul.com/openapi/venda/paths/~1v1~1venda~1busca/get).
+
+## Contrato AgentLab → portal do aluno
+
+O AgentLab é um produto vendido pela Zouti, então a entrada não muda. O que
+decide se uma venda vira matrícula é o produto dentro do payload, cadastrado em
+`student_portal_offers`:
+
+```sql
+insert into public.student_portal_offers (
+  source_platform, source_product_id, edition_code, product_label
+) values ('zouti', 'PRODUCT_ID_DO_AGENTLAB_NA_ZOUTI', 'agent-lab-3', 'AgentLab 3');
+```
+
+`edition_code` é enviado literalmente no campo `edicao`. Sem essa linha nenhuma
+venda chega ao portal: o worker registra o evento em
+`student_portal_skipped_events` e encerra o item. Uma nova edição é só uma nova
+linha — trocar `agent-lab-3` por `agent-lab-4` não exige deploy. Desativar a
+oferta (`enabled = false`) interrompe novas matrículas sem apagar histórico.
+
+- `PAID` chama `/matricula` e marca `access_state = 'granted'`;
+- `REFUNDED`, `CANCELLED` e `DISPUTED` ficam em `last_action = 'revoke_pending'`
+  enquanto o portal não expuser um endpoint de revogação. O acesso permanece
+  marcado como concedido, porque ele continua concedido de fato;
+- `AWAITING_PAYMENT`, recusas e eventos auxiliares (`pmt_`, `sub_`, `smi_`,
+  `rrq_`) são auditados sem chamar o portal;
+- a identidade é `(plataforma, ordem, edição)`: reenvios e mudanças de status
+  atualizam a mesma matrícula, nunca criam outra.
+
+Matrículas aguardando revogação manual:
+
+```sql
+select external_order_id, student_email, edition_code, current_source_status
+from public.student_portal_enrollments
+where last_action = 'revoke_pending';
+```
+
+A ordem de status é a mesma do Conta Azul: uma reversão terminal não regride e
+um webhook fora de ordem não desfaz um estado mais recente.
+
+Antes de ativar, cadastre a oferta e a URL, e só então habilite o despacho:
+
+```sql
+update public.integration_destinations
+set dispatch_enabled = true
+where destination = 'student_portal';
+```
 
 ## RPCs dos processadores
 

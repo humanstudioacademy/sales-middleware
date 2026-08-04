@@ -30,11 +30,17 @@ export default async function handler(request) {
   }
 
   try {
-    const [contaAzul, humanOs] = await Promise.all([
+    const [contaAzul, humanOs, studentPortal] = await Promise.all([
       runWorker("conta-azul-worker", 20, statusSecret),
       runWorker("human-os-worker", 20, statusSecret),
+      runWorker("student-portal-worker", 20, statusSecret),
     ]);
-    return Response.json({ status: "ok", conta_azul: contaAzul, human_os: humanOs }, {
+    return Response.json({
+      status: "ok",
+      conta_azul: contaAzul,
+      human_os: humanOs,
+      student_portal: studentPortal,
+    }, {
       headers: { "cache-control": "no-store" },
     });
   } catch (error) {
