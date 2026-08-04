@@ -92,13 +92,10 @@ pendentes bloqueando o FIFO. `student_portal_enrollment_events` é append-only e
 tem `webhook_id` como chave primária: se o ACK se perder depois da entrega, a
 reexecução encerra o item sem chamar o portal de novo.
 
-O portal expõe apenas `POST /functions/v1/matricula`, que cria matrícula. Não há
-endpoint de revogação, então uma reversão terminal grava
-`last_action = 'revoke_pending'` e mantém `access_state = 'granted'`. Falhar o
-item seria pior: o claim é FIFO estrito por destino, e um item que nunca sucede
-bloquearia todas as matrículas seguintes até esgotar as tentativas. O estado
-pendente fica consultável e a revogação é feita fora do middleware enquanto o
-endpoint não existir.
+Cadastro e revogação usam o mesmo `POST /functions/v1/matricula`, distinguidos
+pelo campo `acao`. O estado local (`access_state`, `granted_at`, `revoked_at`) só
+é gravado depois que o portal responde `2xx`: uma entrega que falha volta para
+retry sem deixar registro de acesso concedido ou revogado que o portal não tenha.
 
 ## Concorrência dos workers
 
@@ -135,7 +132,7 @@ e tamanho.
 | Portal do aluno indisponível | retry exponencial isolado; venda e financeiro não são afetados |
 | Venda sem oferta AgentLab mapeada | registrada em `student_portal_skipped_events` e confirmada |
 | Ordem AgentLab sem e-mail | `mapping_incomplete`; nenhum aluno é criado sem identidade |
-| Reembolso sem endpoint de revogação | `revoke_pending` consultável; a fila não trava |
+| Revogação sem matrícula concedida | não é enviada; o portal não recebe aluno inexistente |
 | Dois crons Conta Azul simultâneos | somente um adquire o lease global |
 | Access token perto de expirar | um worker renova; os demais aguardam |
 | ACK de criação perdido | retry busca pelo número e recupera o UUID |

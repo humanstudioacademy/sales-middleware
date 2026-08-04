@@ -1,6 +1,6 @@
 import { databaseRequest, requiredEnvironment } from "../_shared/database.ts";
 import {
-  buildMatriculaRequest,
+  buildEnrollmentRequest,
   desiredEnrollmentAction,
   type EnrollmentAccessState,
   resolveEnrollmentOffer,
@@ -211,8 +211,10 @@ async function deliver(
   job: ClaimedJob,
   order: CommerceOrder,
   offer: ResolvedOffer,
+  action: "grant" | "revoke",
 ): Promise<number> {
-  const request = buildMatriculaRequest({
+  const request = buildEnrollmentRequest({
+    action,
     editionCode: offer.editionCode,
     order,
     item: offer.item,
@@ -264,7 +266,7 @@ async function fail(job: ClaimedJob, error: unknown): Promise<void> {
 
 async function processJob(
   job: ClaimedJob,
-): Promise<"granted" | "revoke_pending" | "recorded" | "skipped"> {
+): Promise<"granted" | "revoked" | "recorded" | "skipped"> {
   // Um ACK perdido depois da entrega reentrega o mesmo item. O registro
   // append-only do webhook encerra o item sem chamar o portal outra vez.
   if (await alreadyProcessed(job.webhook_id)) {
@@ -309,17 +311,13 @@ async function processJob(
     return "recorded";
   }
 
-  // O endpoint `/matricula` do portal só cria matrícula. Enquanto não existir
-  // um endpoint de revogação, uma reversão terminal fica registrada como
-  // `revoke_pending` e o acesso continua marcado como concedido: dizer que
-  // revogamos sem ter revogado seria mentir na auditoria.
+  // O mesmo endpoint atende os dois lados: sem `acao` cadastra, com
+  // `acao: revogar` remove o acesso. O estado local só muda depois que o
+  // portal confirma, então uma falha na entrega nunca registra acesso que o
+  // portal não tem — nem o contrário.
   const action = desiredEnrollmentAction(order.normalizedStatus, enrollment.access_state);
-  const httpStatus = action === "grant" ? await deliver(job, order, offer) : null;
-  const recordedAction = action === "grant"
-    ? "grant"
-    : action === "revoke"
-    ? "revoke_pending"
-    : `recorded_${order.normalizedStatus}`;
+  const httpStatus = action === "record_only" ? null : await deliver(job, order, offer, action);
+  const recordedAction = action === "record_only" ? `recorded_${order.normalizedStatus}` : action;
   const now = new Date().toISOString();
   const updated = await patchEnrollment(enrollment.id, {
     source_customer_id: order.customer.sourceId,
@@ -336,11 +334,12 @@ async function processJob(
     last_http_status: httpStatus,
     last_synced_at: now,
     ...(action === "grant" ? { access_state: "granted", granted_at: now } : {}),
+    ...(action === "revoke" ? { access_state: "revoked", revoked_at: now } : {}),
   });
 
   await recordEnrollmentEvent(job, updated, order, recordedAction, httpStatus);
   await complete(job, httpStatus ?? 200);
-  return action === "grant" ? "granted" : action === "revoke" ? "revoke_pending" : "recorded";
+  return action === "grant" ? "granted" : action === "revoke" ? "revoked" : "recorded";
 }
 
 Deno.serve(async (request: Request): Promise<Response> => {
@@ -363,7 +362,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
     if (acquired !== true) return json({ status: "already_running" }, 202);
 
     try {
-      const result = { claimed: 0, granted: 0, revoke_pending: 0, recorded: 0, skipped: 0, failed: 0 };
+      const result = { claimed: 0, granted: 0, revoked: 0, recorded: 0, skipped: 0, failed: 0 };
       for (let index = 0; index < batchSize; index += 1) {
         const jobs = await rpc("claim_integration_jobs", {
           p_destination: "student_portal",

@@ -17,12 +17,23 @@ export interface ResolvedOffer {
   item: CommerceItem;
 }
 
-/** Contrato exato aceito por `POST /functions/v1/matricula` no portal. */
+/**
+ * Contratos exatos aceitos por `POST /functions/v1/matricula`. O mesmo endpoint
+ * atende os dois casos e distingue pelo campo `acao`: ausente cadastra,
+ * `revogar` remove o acesso.
+ */
 export interface MatriculaPayload {
   email: string;
   edicao: string;
   nome: string;
   origem: string;
+}
+
+export interface RevogacaoPayload {
+  acao: "revogar";
+  email: string;
+  edicao: string;
+  motivo: string;
 }
 
 export interface EnrollmentRequest {
@@ -87,25 +98,51 @@ export function desiredEnrollmentAction(
  * O portal identifica o aluno pelo e-mail. Uma ordem sem e-mail não pode virar
  * matrícula silenciosamente: ela para com erro de mapeamento e fica visível.
  */
-export function buildMatriculaPayload(
-  order: CommerceOrder,
-  editionCode: string,
-): MatriculaPayload {
+function requiredEmail(order: CommerceOrder): string {
   const email = order.customer.email?.trim();
   if (!email) {
     throw new Error(
       `Student portal mapping is incomplete; order ${order.externalOrderId} has no customer e-mail`,
     );
   }
+  return email;
+}
+
+/** Motivo legível da revogação, derivado do status normalizado da ordem. */
+export function revocationReason(status: NormalizedOrderStatus): string {
   return {
-    email,
+    refunded: "reembolso",
+    chargeback: "chargeback",
+    cancelled: "cancelamento",
+  }[status as "refunded" | "chargeback" | "cancelled"] ?? status;
+}
+
+export function buildMatriculaPayload(
+  order: CommerceOrder,
+  editionCode: string,
+): MatriculaPayload {
+  return {
+    email: requiredEmail(order),
     edicao: editionCode,
     nome: order.customer.name,
     origem: order.sourcePlatform,
   };
 }
 
-export function buildMatriculaRequest(input: {
+export function buildRevogacaoPayload(
+  order: CommerceOrder,
+  editionCode: string,
+): RevogacaoPayload {
+  return {
+    acao: "revogar",
+    email: requiredEmail(order),
+    edicao: editionCode,
+    motivo: revocationReason(order.normalizedStatus),
+  };
+}
+
+export function buildEnrollmentRequest(input: {
+  action: "grant" | "revoke";
   editionCode: string;
   order: CommerceOrder;
   item: CommerceItem;
@@ -113,7 +150,9 @@ export function buildMatriculaRequest(input: {
   token: string;
   trace: { webhookId: string; ingestSequence: number; bodySha256: string };
 }): EnrollmentRequest {
-  const payload = buildMatriculaPayload(input.order, input.editionCode);
+  const payload = input.action === "grant"
+    ? buildMatriculaPayload(input.order, input.editionCode)
+    : buildRevogacaoPayload(input.order, input.editionCode);
   const headers = new Headers({
     "content-type": "application/json",
     "x-matricula-token": input.token,

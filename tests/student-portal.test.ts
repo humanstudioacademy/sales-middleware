@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildEnrollmentRequest,
   buildMatriculaPayload,
-  buildMatriculaRequest,
+  buildRevogacaoPayload,
   desiredEnrollmentAction,
   resolveEnrollmentOffer,
+  revocationReason,
   type StudentPortalOffer,
 } from "../supabase/functions/_shared/student-portal.ts";
 import { type CommerceOrder, parseZoutiOrder } from "../supabase/functions/_shared/zouti-order.ts";
@@ -126,10 +128,60 @@ test("para a matrícula quando a ordem não tem e-mail", () => {
   );
 });
 
+test("monta exatamente o corpo de revogação, sem nome nem origem", () => {
+  const order = orderWith({ status: "REFUNDED", updated_at: "2026-08-03T12:00:00.000Z" });
+  const resolved = resolveEnrollmentOffer(order, offers)!;
+  const payload = buildRevogacaoPayload(order, resolved.editionCode);
+
+  assert.deepEqual(payload, {
+    acao: "revogar",
+    email: "aluna@example.test",
+    edicao: "agent-lab-3",
+    motivo: "reembolso",
+  });
+  assert.deepEqual(Object.keys(payload), ["acao", "email", "edicao", "motivo"]);
+});
+
+test("traduz o motivo a partir do status da ordem", () => {
+  assert.equal(revocationReason("refunded"), "reembolso");
+  assert.equal(revocationReason("chargeback"), "chargeback");
+  assert.equal(revocationReason("cancelled"), "cancelamento");
+});
+
+test("o mesmo endpoint recebe cadastro e revogação com corpos diferentes", () => {
+  const paid = orderWith();
+  const resolved = resolveEnrollmentOffer(paid, offers)!;
+  const shared = {
+    editionCode: resolved.editionCode,
+    item: resolved.item,
+    destinationUrl: "https://plaqjikpfueqmftjrhvs.supabase.co/functions/v1/matricula",
+    token: "token-do-portal",
+    trace,
+  };
+
+  const grant = buildEnrollmentRequest({ ...shared, action: "grant", order: paid });
+  const revoke = buildEnrollmentRequest({
+    ...shared,
+    action: "revoke",
+    order: orderWith({ status: "DISPUTED", updated_at: "2026-08-03T12:00:00.000Z" }),
+  });
+
+  assert.equal(grant.url, revoke.url);
+  assert.equal(grant.headers.get("x-matricula-token"), revoke.headers.get("x-matricula-token"));
+  assert.equal(JSON.parse(grant.body).acao, undefined);
+  assert.deepEqual(JSON.parse(revoke.body), {
+    acao: "revogar",
+    email: "aluna@example.test",
+    edicao: "agent-lab-3",
+    motivo: "chargeback",
+  });
+});
+
 test("autentica pelo header do portal e mantém o rastro da entrega", () => {
   const order = orderWith();
   const resolved = resolveEnrollmentOffer(order, offers)!;
-  const request = buildMatriculaRequest({
+  const request = buildEnrollmentRequest({
+    action: "grant",
     editionCode: resolved.editionCode,
     order,
     item: resolved.item,

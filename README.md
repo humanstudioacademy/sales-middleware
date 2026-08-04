@@ -190,7 +190,7 @@ JSON da ordem, resolve a elegibilidade pelo produto vendido e chama o endpoint d
 matrícula configurado em `STUDENT_PORTAL_WEBHOOK_URL`, autenticando com
 `x-matricula-token: <STUDENT_PORTAL_MATRICULA_TOKEN>`.
 
-O corpo é exatamente o contrato do portal, sem campos extras:
+O mesmo endpoint atende os dois lados e distingue pelo campo `acao`. Cadastro:
 
 ```json
 {
@@ -200,6 +200,19 @@ O corpo é exatamente o contrato do portal, sem campos extras:
   "origem": "zouti"
 }
 ```
+
+Revogação:
+
+```json
+{
+  "acao": "revogar",
+  "email": "aluna@example.test",
+  "edicao": "agent-lab-3",
+  "motivo": "reembolso"
+}
+```
+
+`motivo` sai do status normalizado: `reembolso`, `chargeback` ou `cancelamento`.
 
 O rastro viaja em headers, onde não interfere na validação do portal:
 `idempotency-key: student-portal-<webhook_id>`, `x-humanos-order-id`,
@@ -374,22 +387,17 @@ venda chega ao portal: o worker registra o evento em
 linha — trocar `agent-lab-3` por `agent-lab-4` não exige deploy. Desativar a
 oferta (`enabled = false`) interrompe novas matrículas sem apagar histórico.
 
-- `PAID` chama `/matricula` e marca `access_state = 'granted'`;
-- `REFUNDED`, `CANCELLED` e `DISPUTED` ficam em `last_action = 'revoke_pending'`
-  enquanto o portal não expuser um endpoint de revogação. O acesso permanece
-  marcado como concedido, porque ele continua concedido de fato;
+- `PAID` cadastra e marca `access_state = 'granted'`;
+- `REFUNDED`, `CANCELLED` e `DISPUTED` revogam e marcam `access_state =
+  'revoked'`, mas só quando o acesso chegou a ser concedido — o portal nunca
+  recebe revogação de aluno que não existe;
 - `AWAITING_PAYMENT`, recusas e eventos auxiliares (`pmt_`, `sub_`, `smi_`,
   `rrq_`) são auditados sem chamar o portal;
 - a identidade é `(plataforma, ordem, edição)`: reenvios e mudanças de status
   atualizam a mesma matrícula, nunca criam outra.
 
-Matrículas aguardando revogação manual:
-
-```sql
-select external_order_id, student_email, edition_code, current_source_status
-from public.student_portal_enrollments
-where last_action = 'revoke_pending';
-```
+O estado local só muda depois que o portal confirma. Se a entrega falhar, o item
+volta para retry e nada é registrado como concedido ou revogado indevidamente.
 
 A ordem de status é a mesma do Conta Azul: uma reversão terminal não regride e
 um webhook fora de ordem não desfaz um estado mais recente.
