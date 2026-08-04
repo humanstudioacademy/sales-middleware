@@ -10,6 +10,8 @@ export interface StudentPortalOffer {
   edition_code: string;
   product_label: string | null;
   enabled: boolean;
+  starts_at: string;
+  ends_at: string | null;
 }
 
 export interface ResolvedOffer {
@@ -43,11 +45,25 @@ export interface EnrollmentRequest {
 }
 
 /**
+ * A janela é avaliada contra a data de criação da ordem na origem, não contra o
+ * relógio do worker. Assim um reembolso que chega meses depois resolve para a
+ * mesma edição em que o aluno foi matriculado, em vez da turma que estiver
+ * vendendo no dia da revogação.
+ */
+export function offerCoversPurchase(offer: StudentPortalOffer, purchasedAt: string): boolean {
+  const instant = Date.parse(purchasedAt);
+  if (!Number.isFinite(instant)) return false;
+  if (instant < Date.parse(offer.starts_at)) return false;
+  return offer.ends_at === null || instant < Date.parse(offer.ends_at);
+}
+
+/**
  * A venda pertence ao portal quando um item da ordem está mapeado para uma
- * edição ativa. O produto é a fonte de verdade: a query `?event=` da Zouti não
- * participa da decisão, então uma URL cadastrada errada não cria nem impede
- * matrícula. Ofertas que apontam para edições diferentes na mesma ordem são um
- * erro de cadastro e param o item em vez de escolher uma edição no escuro.
+ * edição ativa na data da compra. O produto é a fonte de verdade: a query
+ * `?event=` da Zouti não participa da decisão, então uma URL cadastrada errada
+ * não cria nem impede matrícula. Ofertas que apontam para edições diferentes na
+ * mesma ordem são um erro de cadastro e param o item em vez de escolher uma
+ * edição no escuro.
  */
 export function resolveEnrollmentOffer(
   order: CommerceOrder,
@@ -57,6 +73,7 @@ export function resolveEnrollmentOffer(
   for (const offer of offers) {
     if (!offer.enabled) continue;
     if (offer.source_platform.trim().toLowerCase() !== order.sourcePlatform) continue;
+    if (!offerCoversPurchase(offer, order.sourceCreatedAt)) continue;
     active.set(offer.source_product_id.trim(), offer);
   }
 

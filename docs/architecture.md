@@ -81,10 +81,17 @@ que bloqueiem o FIFO sem descartá-los ou interpretá-los como novas vendas.
 
 No portal do aluno, a identidade é `(source_platform, external_order_id,
 edition_code)`. A elegibilidade vem do produto vendido: um item da ordem precisa
-estar mapeado em `student_portal_offers` para uma edição ativa. A query `?event=`
-não participa dessa decisão, então uma URL cadastrada errada na Zouti não cria
-nem impede matrícula. Ofertas que apontam para edições diferentes na mesma ordem
-param o item com `mapping_incomplete` em vez de escolher uma edição no escuro.
+estar mapeado em `student_portal_offers` para uma edição ativa **na data da
+compra**. A mesma oferta da Zouti vende por vários meses e a turma vira pelo
+calendário, então a edição é função de `(produto, momento da compra)`, resolvida
+contra `sourceCreatedAt` da ordem — nunca contra o relógio do worker. Um
+reembolso que chega meses depois revoga a turma em que o aluno entrou, não a que
+estiver vendendo no dia. Janelas ativas sobrepostas do mesmo produto são
+recusadas por constraint de exclusão GiST.
+
+A query `?event=` não participa dessa decisão, então uma URL cadastrada errada na
+Zouti não cria nem impede matrícula. Ofertas que apontam para edições diferentes
+na mesma ordem param o item com `mapping_incomplete` em vez de escolher no escuro.
 
 Vendas sem produto mapeado e eventos auxiliares são gravados em
 `student_portal_skipped_events` antes de confirmar a fila — nunca ficam

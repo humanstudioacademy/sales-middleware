@@ -377,15 +377,28 @@ decide se uma venda vira matrícula é o produto dentro do payload, cadastrado e
 
 ```sql
 insert into public.student_portal_offers (
-  source_platform, source_product_id, edition_code, product_label
-) values ('zouti', 'PRODUCT_ID_DO_AGENTLAB_NA_ZOUTI', 'agent-lab-3', 'AgentLab 3');
+  source_platform, source_product_id, edition_code, product_label, starts_at, ends_at
+) values (
+  'zouti', 'PRODUCT_ID_DO_AGENTLAB_NA_ZOUTI', 'agent-lab-3', 'AgentLab 3',
+  '2026-08-04 00:00:00-03', '2026-09-20 00:00:00-03'
+);
 ```
 
-`edition_code` é enviado literalmente no campo `edicao`. Sem essa linha nenhuma
-venda chega ao portal: o worker registra o evento em
-`student_portal_skipped_events` e encerra o item. Uma nova edição é só uma nova
-linha — trocar `agent-lab-3` por `agent-lab-4` não exige deploy. Desativar a
-oferta (`enabled = false`) interrompe novas matrículas sem apagar histórico.
+A mesma oferta da Zouti vende continuamente e a turma muda com o calendário, por
+isso a edição é função de **(produto, momento da compra)**. `starts_at` é
+inclusivo, `ends_at` é exclusivo, e `ends_at` nulo mantém a janela aberta. Virar
+de turma é inserir a próxima linha, sem tocar em código nem na Zouti.
+
+A janela é comparada com a **data de criação da ordem na origem**, não com a
+data em que o webhook chegou nem com o relógio do worker. É isso que faz um
+reembolso de outubro revogar a turma de agosto, e não a que estiver vendendo no
+dia. Duas janelas ativas do mesmo produto não podem se sobrepor — o banco recusa
+pela constraint de exclusão, em vez de deixar a escolha ao acaso.
+
+`edition_code` é enviado literalmente no campo `edicao`. Sem uma linha que cubra
+a data da compra, nenhuma venda chega ao portal: o worker registra o evento em
+`student_portal_skipped_events` e encerra o item. Desativar a oferta
+(`enabled = false`) interrompe novas matrículas sem apagar histórico.
 
 - `PAID` cadastra e marca `access_state = 'granted'`;
 - `REFUNDED`, `CANCELLED` e `DISPUTED` revogam e marcam `access_state =

@@ -17,8 +17,8 @@ const agentLabPayload = {
   provider: "ZOUTI",
   status: "PAID",
   currency: "BRL",
-  created_at: "2026-08-03T10:00:00.000Z",
-  updated_at: "2026-08-03T10:00:00.000Z",
+  created_at: "2026-08-10T10:00:00.000Z",
+  updated_at: "2026-08-10T10:00:00.000Z",
   amount_total: 199700,
   amount_total_in_brl: 1997,
   customer_id: "cus_agentlab_1",
@@ -46,7 +46,18 @@ const offers: StudentPortalOffer[] = [{
   edition_code: "agent-lab-3",
   product_label: "AgentLab 3",
   enabled: true,
+  starts_at: "2026-08-04T03:00:00.000Z",
+  ends_at: "2026-09-20T03:00:00.000Z",
 }];
+
+/** Mesmo produto, janela seguinte: a turma vira sem trocar a oferta na Zouti. */
+const nextEdition: StudentPortalOffer = {
+  ...offers[0],
+  edition_code: "agent-lab-4",
+  product_label: "AgentLab 4",
+  starts_at: "2026-09-20T03:00:00.000Z",
+  ends_at: null,
+};
 
 const trace = {
   webhookId: "00000000-0000-4000-8000-000000000001",
@@ -77,13 +88,7 @@ test("ignora vendas de outros produtos e ofertas desativadas", () => {
 test("não escolhe edição no escuro quando o cadastro conflita", () => {
   const twoEditions: StudentPortalOffer[] = [
     ...offers,
-    {
-      source_platform: "zouti",
-      source_product_id: "prod_agentlab_agl4",
-      edition_code: "agent-lab-4",
-      product_label: "AgentLab 4",
-      enabled: true,
-    },
+    { ...offers[0], source_product_id: "prod_agentlab_agl4", edition_code: "agent-lab-4" },
   ];
   const order = orderWith({
     items: [
@@ -92,6 +97,54 @@ test("não escolhe edição no escuro quando o cadastro conflita", () => {
     ],
   });
   assert.throws(() => resolveEnrollmentOffer(order, twoEditions), /mapping conflict/);
+});
+
+test("a edição vem da janela em que a compra caiu, não da que está vendendo hoje", () => {
+  const janela = [offers[0], nextEdition];
+
+  const dentro = resolveEnrollmentOffer(orderWith(), janela);
+  assert.equal(dentro?.editionCode, "agent-lab-3");
+
+  const depois = resolveEnrollmentOffer(
+    orderWith({ created_at: "2026-10-01T10:00:00.000Z", updated_at: "2026-10-01T10:00:00.000Z" }),
+    janela,
+  );
+  assert.equal(depois?.editionCode, "agent-lab-4");
+
+  // Venda anterior à primeira janela não pertence a nenhuma turma.
+  const antes = resolveEnrollmentOffer(
+    orderWith({ created_at: "2026-08-03T10:00:00.000Z", updated_at: "2026-08-03T10:00:00.000Z" }),
+    janela,
+  );
+  assert.equal(antes, null);
+});
+
+test("os limites da janela são inclusivo no início e exclusivo no fim", () => {
+  const noPrimeiroInstante = orderWith({
+    created_at: offers[0].starts_at,
+    updated_at: offers[0].starts_at,
+  });
+  assert.equal(resolveEnrollmentOffer(noPrimeiroInstante, offers)?.editionCode, "agent-lab-3");
+
+  const noInstanteDoCorte = orderWith({
+    created_at: offers[0].ends_at!,
+    updated_at: offers[0].ends_at!,
+  });
+  assert.equal(resolveEnrollmentOffer(noInstanteDoCorte, offers), null);
+});
+
+test("um reembolso tardio revoga a edição original, não a turma do momento", () => {
+  const janela = [offers[0], nextEdition];
+  // Comprou na 3ª edição em agosto, pediu reembolso em outubro, quando a 4ª
+  // edição já está vendendo pelo mesmo produto.
+  const reembolsoTardio = orderWith({
+    status: "REFUNDED",
+    created_at: "2026-08-10T10:00:00.000Z",
+    updated_at: "2026-10-05T10:00:00.000Z",
+  });
+  const resolved = resolveEnrollmentOffer(reembolsoTardio, janela);
+  assert.equal(resolved?.editionCode, "agent-lab-3");
+  assert.equal(buildRevogacaoPayload(reembolsoTardio, resolved!.editionCode).edicao, "agent-lab-3");
 });
 
 test("libera no pagamento e só revoga depois de ter liberado", () => {
@@ -129,7 +182,7 @@ test("para a matrícula quando a ordem não tem e-mail", () => {
 });
 
 test("monta exatamente o corpo de revogação, sem nome nem origem", () => {
-  const order = orderWith({ status: "REFUNDED", updated_at: "2026-08-03T12:00:00.000Z" });
+  const order = orderWith({ status: "REFUNDED", updated_at: "2026-08-10T12:00:00.000Z" });
   const resolved = resolveEnrollmentOffer(order, offers)!;
   const payload = buildRevogacaoPayload(order, resolved.editionCode);
 
@@ -163,7 +216,7 @@ test("o mesmo endpoint recebe cadastro e revogação com corpos diferentes", () 
   const revoke = buildEnrollmentRequest({
     ...shared,
     action: "revoke",
-    order: orderWith({ status: "DISPUTED", updated_at: "2026-08-03T12:00:00.000Z" }),
+    order: orderWith({ status: "DISPUTED", updated_at: "2026-08-10T12:00:00.000Z" }),
   });
 
   assert.equal(grant.url, revoke.url);

@@ -89,9 +89,11 @@ async function alreadyProcessed(webhookId: string): Promise<boolean> {
   return Boolean(events[0] || skipped[0]);
 }
 
-async function listOffers(platform: string): Promise<StudentPortalOffer[]> {
+async function listOffers(platform: string, purchasedAt: string): Promise<StudentPortalOffer[]> {
+  const at = encodeURIComponent(purchasedAt);
   return await databaseJson(
-    `/rest/v1/student_portal_offers?select=*&source_platform=eq.${encodeURIComponent(platform)}&enabled=is.true`,
+    `/rest/v1/student_portal_offers?select=*&source_platform=eq.${encodeURIComponent(platform)}` +
+      `&enabled=is.true&starts_at=lte.${at}&or=(ends_at.is.null,ends_at.gt.${at})`,
     { method: "GET" },
   ) as StudentPortalOffer[];
 }
@@ -282,7 +284,8 @@ async function processJob(
   }
 
   const order = parseZoutiOrder(job.body_json, job.source_platform);
-  const offer = resolveEnrollmentOffer(order, await listOffers(order.sourcePlatform));
+  const offers = await listOffers(order.sourcePlatform, order.sourceCreatedAt);
+  const offer = resolveEnrollmentOffer(order, offers);
   if (!offer) {
     await skipEvent(job, {
       entityKind: "order",
