@@ -1,3 +1,14 @@
+import {
+  brl,
+  describeSaleEconomics,
+  economicsSummaryLine,
+  type FeeAdjustment,
+  gatewaySaleEconomics,
+  round2,
+  type SaleEconomics,
+  totalDeducted,
+} from "./sale-economics.ts";
+
 export type NormalizedOrderStatus =
   | "pending"
   | "paid"
@@ -51,6 +62,8 @@ export interface CommerceOrder {
   feeAmount: number | null;
   interestAmount: number | null;
   interestTransferAmount: number | null;
+  discountAmount: number | null;
+  refundedAmount: number | null;
   paymentMethod: string | null;
   paymentType: string | null;
   installments: number;
@@ -60,6 +73,8 @@ export interface CommerceOrder {
   attribution: Record<string, string>;
   customer: CommerceCustomer;
   items: CommerceItem[];
+  // Valor que realmente entra na conta, com cada tarifa retida discriminada.
+  economics: SaleEconomics;
 }
 
 export interface ExistingOrderState {
@@ -215,7 +230,11 @@ export function classifyInboundCommerceEvent(
   };
 }
 
-export function parseZoutiOrder(body: unknown, sourcePlatform: string): CommerceOrder {
+export function parseZoutiOrder(
+  body: unknown,
+  sourcePlatform: string,
+  adjustments: FeeAdjustment[] = [],
+): CommerceOrder {
   const root = object(body);
   if (!root) throw new Error("Webhook body is not a JSON object");
   const customer = object(root.customer);
@@ -274,6 +293,25 @@ export function parseZoutiOrder(body: unknown, sourcePlatform: string): Commerce
     ["sck", optionalString(tracking?.sck)],
   ].filter((entry): entry is [string, string] => Boolean(entry[1])));
 
+  const currency = requiredString(root.currency, "currency").toUpperCase();
+  const paymentAmount = payment ? optionalMoney(payment.amount_in_brl, payment.amount, "payment.amount") : null;
+  const netAmount = payment ? optionalMoney(payment.net_amount_in_brl, payment.net_amount, "payment.net_amount") : null;
+  const feeAmount = payment ? optionalMoney(payment.fee_in_brl, payment.fee, "payment.fee") : null;
+  const interestAmount = payment
+    ? optionalMoney(payment.interest_amount_in_brl, payment.interest_amount, "payment.interest_amount")
+    : null;
+  const interestTransferAmount = payment
+    ? optionalMoney(
+      payment.interest_transfer_amount_in_brl,
+      payment.interest_transfer_amount,
+      "payment.interest_transfer_amount",
+    )
+    : null;
+  const refundedAmount = payment
+    ? optionalMoney(payment.amount_refunded_in_brl, payment.amount_refunded, "payment.amount_refunded")
+    : null;
+  const installments = Math.max(1, Math.trunc(Number(payment?.installments) || 1));
+
   return {
     sourcePlatform: normalizePlatform(optionalString(root.provider) ?? sourcePlatform),
     externalOrderId: requiredString(root.id, "id"),
@@ -281,25 +319,31 @@ export function parseZoutiOrder(body: unknown, sourcePlatform: string): Commerce
     normalizedStatus: normalizeOrderStatus(sourceStatus),
     sourceCreatedAt: createdAt,
     sourceUpdatedAt: updatedAt,
-    currency: requiredString(root.currency, "currency").toUpperCase(),
+    currency,
     subtotalAmount: optionalMoney(root.amount_subtotal_in_brl, root.amount_subtotal, "amount_subtotal"),
     totalAmount,
-    paymentAmount: payment ? optionalMoney(payment.amount_in_brl, payment.amount, "payment.amount") : null,
-    netAmount: payment ? optionalMoney(payment.net_amount_in_brl, payment.net_amount, "payment.net_amount") : null,
-    feeAmount: payment ? optionalMoney(payment.fee_in_brl, payment.fee, "payment.fee") : null,
-    interestAmount: payment
-      ? optionalMoney(payment.interest_amount_in_brl, payment.interest_amount, "payment.interest_amount")
-      : null,
-    interestTransferAmount: payment
-      ? optionalMoney(
-        payment.interest_transfer_amount_in_brl,
-        payment.interest_transfer_amount,
-        "payment.interest_transfer_amount",
-      )
-      : null,
+    paymentAmount,
+    netAmount,
+    feeAmount,
+    interestAmount,
+    interestTransferAmount,
+    discountAmount: optionalMoney(payment?.discount_amount_in_brl, payment?.discount_amount, "payment.discount_amount"),
+    refundedAmount,
+    economics: gatewaySaleEconomics({
+      currency,
+      platformLabel: "Zouti",
+      grossAmount: totalAmount,
+      chargedAmount: paymentAmount,
+      feeAmount,
+      interestAmount,
+      interestTransferAmount,
+      refundedAmount,
+      declaredNetAmount: netAmount,
+      installments,
+    }, adjustments),
     paymentMethod: optionalString(payment?.method)?.toUpperCase() ?? null,
     paymentType: optionalString(root.payment_type)?.toUpperCase() ?? null,
-    installments: Math.max(1, Math.trunc(Number(payment?.installments) || 1)),
+    installments,
     isSplitPayment: root.is_split_payment === true || splitPayments.length > 1,
     splitPayments,
     orderSessionId: optionalString(root.order_session_id),
@@ -463,10 +507,6 @@ export function buildContaAzulProduct(item: CommerceItem): JsonObject {
   };
 }
 
-function brl(value: number): string {
-  return `R$ ${value.toFixed(2).replace(".", ",")}`;
-}
-
 function statusLabel(status: NormalizedOrderStatus): string {
   return {
     paid: "Aprovado/pago",
@@ -488,11 +528,14 @@ function paymentDescription(order: CommerceOrder): string {
     `Parcelamento: ${order.installments === 1 ? "À vista (1x)" : `${order.installments} parcelas`}`,
     `Moeda: ${order.currency}`,
     order.subtotalAmount === null ? null : `Subtotal: ${brl(order.subtotalAmount)}`,
+    order.discountAmount === null ? null : `Desconto concedido: ${brl(order.discountAmount)}`,
     `Total cobrado: ${brl(order.paymentAmount ?? order.totalAmount)}`,
     order.interestAmount === null ? null : `Juros: ${brl(order.interestAmount)}`,
     order.interestTransferAmount === null ? null : `Juros repassados: ${brl(order.interestTransferAmount)}`,
     `Taxa da plataforma: ${brl(order.feeAmount ?? 0)}`,
-    `Valor líquido: ${brl(order.netAmount ?? order.totalAmount)}`,
+    `Valor líquido: ${brl(order.economics.netAmount)}`,
+    "",
+    ...describeSaleEconomics(order.economics),
   ].filter((line): line is string => Boolean(line));
   if (order.splitPayments.length) {
     lines.push("Divisão do pagamento:");
@@ -507,6 +550,7 @@ function paymentDescription(order: CommerceOrder): string {
 
 function saleDescription(
   order: CommerceOrder,
+  netValues: number[],
   trace?: { webhookId: string; ingestSequence: number; receivedAt: string; eventType: string | null },
 ): string {
   const lines = [
@@ -521,11 +565,14 @@ function saleDescription(
     trace ? `Webhook: ${trace.webhookId}` : null,
     trace ? `Sequência de ingestão: ${trace.ingestSequence}` : null,
     "",
+    ...describeSaleEconomics(order.economics),
+    "",
     "ITENS",
     ...order.items.flatMap((item, index) => [
       `${index + 1}. ${item.name}`,
       `   Produto Zouti: ${item.sourceId}${item.type ? ` | Tipo: ${item.type}` : ""}`,
-      `   Quantidade: ${item.quantity} | Unitário: ${brl(item.unitAmount)} | Total: ${brl(item.unitAmount * item.quantity)}`,
+      `   Quantidade: ${item.quantity} | Valor de oferta: ${brl(item.unitAmount)}`
+      + ` | Lançado líquido: ${brl(netValues[index])}`,
       item.description ? `   Descrição: ${item.description}` : null,
     ]),
   ].filter((line): line is string => line !== null);
@@ -535,6 +582,28 @@ function saleDescription(
     attribution.forEach(([key, value]) => lines.push(`${key}: ${value}`));
   }
   return lines.join("\n").slice(0, 4000);
+}
+
+// O valor lançado na Conta Azul é o líquido, então a dedução total é rateada
+// entre os itens na proporção do preço de oferta de cada um.
+function allocateNetItemValues(order: CommerceOrder): { unitValues: number[]; total: number } {
+  const offerTotals = order.items.map((item) => round2(item.unitAmount * item.quantity));
+  const offerTotal = round2(offerTotals.reduce((sum, value) => sum + value, 0));
+  const target = order.economics.netAmount;
+  if (offerTotal <= 0) throw new Error("Conta Azul sale requires a positive item total");
+  if (target <= 0) {
+    throw new Error(`Conta Azul sale has no positive net value after platform fees: ${target}`);
+  }
+
+  const netTotals = offerTotals.map((value) => round2(value * target / offerTotal));
+  const largest = netTotals.reduce((best, value, index) => (value > netTotals[best] ? index : best), 0);
+  netTotals[largest] = round2(
+    netTotals[largest] + round2(target - netTotals.reduce((sum, value) => sum + value, 0)),
+  );
+
+  const unitValues = order.items.map((item, index) => round2(netTotals[index] / item.quantity));
+  const total = round2(order.items.reduce((sum, item, index) => sum + item.quantity * unitValues[index], 0));
+  return { unitValues, total };
 }
 
 export function buildContaAzulSale(
@@ -553,17 +622,14 @@ export function buildContaAzulSale(
   if (input.productIds.length !== order.items.length) {
     throw new Error("Conta Azul product mapping is incomplete");
   }
-  const values = order.items.map((item) => item.unitAmount);
-  const mappedTotal = order.items.reduce((sum, item, index) => sum + item.quantity * values[index], 0);
-  const difference = Math.round((order.totalAmount - mappedTotal) * 100) / 100;
-  values[0] = Math.round((values[0] + difference / order.items[0].quantity) * 100) / 100;
+  const { unitValues, total: netTotal } = allocateNetItemValues(order);
 
   const sale: JsonObject = {
     id_cliente: input.customerId,
     numero: input.saleNumber,
     situacao: input.situation,
     data_venda: order.sourceCreatedAt.slice(0, 10),
-    observacoes: saleDescription(order, input.trace),
+    observacoes: saleDescription(order, unitValues, input.trace),
     observacoes_pagamento: paymentDescription(order),
     itens: order.items.map((item, index) => ({
       id: input.productIds[index],
@@ -572,9 +638,10 @@ export function buildContaAzulSale(
         item.description,
         `Produto Zouti: ${item.sourceId}`,
         item.type ? `Tipo: ${item.type}` : null,
+        `Oferta ${brl(item.unitAmount)} | líquido após tarifas ${brl(unitValues[index])}`,
       ].filter(Boolean).join(" | ").slice(0, 400),
       quantidade: item.quantity,
-      valor: values[index],
+      valor: unitValues[index],
     })),
     condicao_pagamento: {
       tipo_pagamento: contaAzulPaymentMethod(order),
@@ -583,8 +650,8 @@ export function buildContaAzulSale(
       nsu: order.externalOrderId,
       parcelas: [{
         data_vencimento: order.sourceCreatedAt.slice(0, 10),
-        valor: order.totalAmount,
-        descricao: `Ordem ${order.externalOrderId}`,
+        valor: netTotal,
+        descricao: `Ordem ${order.externalOrderId} | ${economicsSummaryLine(order.economics)}`.slice(0, 200),
       }],
     },
   };
