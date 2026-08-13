@@ -249,13 +249,45 @@ test("builds customer and one balanced Conta Azul sale", () => {
   assert.equal(sale.id_categoria, "category-uuid");
   assert.equal(sale.situacao, "APROVADO");
   assert.equal(sale.versao, 1);
-  assert.equal(sale.itens[0].valor, 97.9);
+  // O item entra pelo líquido: R$ 97,90 cobrados - R$ 2,90 de tarifa.
+  assert.equal(sale.itens[0].valor, 95);
+  assert.equal(sale.condicao_pagamento.parcelas[0].valor, 95);
   assert.match(String(sale.observacoes), /Situação atual: Aprovado\/pago \(PAID\)/);
   assert.match(String(sale.observacoes), /Sequência de ingestão: 1388/);
   assert.match(String(sale.observacoes), /utm_campaign: academy_pass/);
+  assert.match(String(sale.observacoes), /Valor pago pelo cliente: R\$ 97,90/);
+  assert.match(String(sale.observacoes), /\(-\) Tarifa da plataforma Zouti: R\$ 2,90/);
+  assert.match(String(sale.observacoes), /\(=\) Valor líquido lançado na Conta Azul: R\$ 95,00/);
+  assert.match(String(sale.observacoes), /Valor de oferta: R\$ 97,00 \| Lançado líquido: R\$ 95,00/);
   assert.match(String(sale.observacoes_pagamento), /Taxa da plataforma: R\$ 2,90/);
   assert.match(String(sale.observacoes_pagamento), /Valor líquido: R\$ 95,00/);
   assert.match(String(sale.observacoes_pagamento), /PAYMENT_0: CREDIT_CARD — R\$ 50,00/);
   assert.equal(sale.condicao_pagamento.id_conta_financeira, "account-uuid");
   assert.equal(sale.condicao_pagamento.parcelas.length, 1);
+});
+
+test("rateia a dedução entre os itens e fecha a venda no valor líquido", () => {
+  const order = parseZoutiOrder({
+    ...paidPayload,
+    amount_total_in_brl: 300,
+    amount_total: 30000,
+    items: [
+      { product_id: "prod_a", name: "Item A", quantity: 1, amount_in_brl: 200, amount: 20000 },
+      { product_id: "prod_b", name: "Item B", quantity: 2, amount_in_brl: 100, amount: 10000 },
+    ],
+    payment: { method: "PIX", installments: 1, amount_in_brl: 300, fee_in_brl: 30, net_amount_in_brl: 270 },
+  }, "zouti");
+  const sale = buildContaAzulSale(order, {
+    customerId: "customer-uuid",
+    productIds: ["product-a", "product-b"],
+    saleNumber: 1,
+    financialAccountId: "account-uuid",
+    categoryId: null,
+    situation: "APROVADO",
+  });
+
+  assert.equal(order.economics.netAmount, 270);
+  const itemTotal = sale.itens.reduce((sum, item) => sum + item.quantidade * item.valor, 0);
+  assert.equal(Math.round(itemTotal * 100) / 100, 270);
+  assert.equal(sale.condicao_pagamento.parcelas[0].valor, 270);
 });

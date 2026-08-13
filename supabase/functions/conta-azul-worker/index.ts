@@ -1,5 +1,12 @@
 import { contaAzulRequest } from "../_shared/conta-azul.ts";
 import { databaseRequest, requiredEnvironment } from "../_shared/database.ts";
+import {
+  economicsSummaryLine,
+  type FeeAdjustment,
+  round2,
+  settlementRetention,
+  totalDeducted,
+} from "../_shared/sale-economics.ts";
 import { authenticateBearerToken, sha256Hex } from "../_shared/webhook.ts";
 import {
   buildContaAzulPerson,
@@ -36,6 +43,7 @@ interface OrderRow {
   id: string;
   source_platform: string;
   external_order_id: string;
+  last_webhook_id: string;
   current_source_status: string;
   normalized_status: CommerceOrder["normalizedStatus"];
   last_ingest_sequence: number;
@@ -252,6 +260,35 @@ async function deferEvent(
       }),
     },
   );
+}
+
+async function getFeeAdjustments(platform: string, externalReference: string): Promise<FeeAdjustment[]> {
+  let rows: Array<{ code: string; label: string; amount: string | number; detail: string | null }>;
+  try {
+    rows = await databaseJson(
+      `/rest/v1/platform_fee_adjustments?select=code,label,amount,detail&source_platform=eq.${encodeURIComponent(platform)}&external_reference=eq.${encodeURIComponent(externalReference)}&order=code.asc`,
+      { method: "GET" },
+    ) as typeof rows;
+  } catch (error) {
+    // A tabela de tarifas de extrato é opcional: enquanto a migration não
+    // estiver aplicada, a venda segue com as tarifas do próprio webhook.
+    const message = error instanceof Error ? error.message : "";
+    if (!/PGRST205|PGRST202|does not exist/i.test(message)) throw error;
+    console.warn("platform_fee_adjustments_unavailable", { platform });
+    return [];
+  }
+  return rows.flatMap((row) => {
+    const amount = numberValue(row.amount);
+    return amount === null ? [] : [{ code: row.code, label: row.label, amount, detail: row.detail }];
+  });
+}
+
+// A identidade do pedido só existe depois do parse, então o parse acontece duas
+// vezes quando o extrato já trouxe tarifas para aquela transação.
+async function parseOrderWithAdjustments(body: unknown, platform: string): Promise<CommerceOrder> {
+  const order = parseZoutiOrder(body, platform);
+  const adjustments = await getFeeAdjustments(order.sourcePlatform, order.externalOrderId);
+  return adjustments.length ? parseZoutiOrder(body, platform, adjustments) : order;
 }
 
 async function getOrder(platform: string, externalOrderId: string): Promise<OrderRow | null> {
@@ -616,6 +653,20 @@ async function allocateSaleNumber(orderRow: OrderRow): Promise<{ row: OrderRow; 
   return { row: await patchOrder(orderRow.id, { conta_azul_sale_number: saleNumber, last_action: "syncing" }), number: saleNumber };
 }
 
+// A parcela expõe o valor em `valor_composicao.valor_bruto`; `valor_pago` só
+// reflete o que já foi baixado e é zero enquanto a parcela está aberta.
+function installmentGross(installment: JsonObject): number | null {
+  return numberValue(object(installment.valor_composicao)?.valor_bruto)
+    ?? numberValue(installment.valor)
+    ?? numberValue(object(installment.detalhe_valor)?.valor_bruto)
+    ?? numberValue(installment.valor_pago);
+}
+
+function embeddedSettlements(installment: JsonObject): JsonObject[] {
+  const baixas = installment.baixas;
+  return Array.isArray(baixas) ? baixas.map(object).filter((item): item is JsonObject => Boolean(item)) : [];
+}
+
 async function listFinancialInstallments(financialEventId: string): Promise<JsonObject[]> {
   const response = await contaAzulJson(
     `/v1/financeiro/eventos-financeiros/${encodeURIComponent(financialEventId)}/parcelas`,
@@ -641,6 +692,10 @@ async function ensureSaleSettled(
   details: SaleDetails,
   order: CommerceOrder,
   financialAccountId: string,
+  // Total esperado das parcelas. Depois de um PUT a lista de parcelas pode
+  // demorar a refletir o novo valor, e baixar pelo valor antigo é recusado com
+  // "A soma do Valor nominal das Baixas não deve exceder o valor nominal da Parcela".
+  expectedTotal: number | null = null,
 ): Promise<number | null> {
   let refreshed = details;
   for (const delay of [0, 300, 700, 1_500, 2_500]) {
@@ -652,20 +707,34 @@ async function ensureSaleSettled(
     throw new Error("Conta Azul sale returned no financial event for settlement");
   }
   let installments: JsonObject[] = [];
-  for (const delay of [0, 300, 700, 1_500]) {
+  let nominalTotal = 0;
+  for (const delay of [0, 300, 700, 1_500, 2_500, 4_000]) {
     if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
     installments = await listFinancialInstallments(refreshed.financialEventId);
-    if (installments.length > 0) break;
+    if (installments.length === 0) continue;
+    nominalTotal = round2(installments.reduce((sum, item) => sum + (installmentGross(item) ?? 0), 0));
+    if (expectedTotal === null || Math.abs(nominalTotal - expectedTotal) < 0.01) break;
   }
   if (installments.length === 0) throw new Error("Conta Azul sale returned no financial installments");
+  // Se a propagação ainda não terminou, a baixa acompanha proporcionalmente o
+  // valor esperado em vez de exceder o nominal da parcela.
+  const scale = expectedTotal !== null && nominalTotal > expectedTotal + 0.005 && nominalTotal > 0
+    ? expectedTotal / nominalTotal
+    : 1;
   let latestStatus: number | null = null;
   for (const installment of installments) {
     const installmentId = stringId(installment);
     if (!installmentId) throw new Error("Conta Azul installment returned no identifier");
     if ((await existingSettlements(installmentId)).length > 0) continue;
-    const gross = numberValue(installment.valor)
-      ?? numberValue(object(installment.detalhe_valor)?.valor_bruto)
-      ?? order.totalAmount / installments.length;
+    // A parcela já nasce sem a tarifa da plataforma, então a baixa não pode
+    // descontá-la outra vez. A taxa aqui é só a retenção que ficou na receita
+    // (juros de parcelamento), para a conta bancária fechar no valor creditado.
+    const receivable = round2(
+      (installmentGross(installment) ?? round2(order.economics.netAmount / installments.length)) * scale,
+    );
+    const retention = order.economics.netAmount > 0
+      ? round2(receivable * settlementRetention(order.economics) / order.economics.netAmount)
+      : 0;
     const response = await contaAzulJson(
       `/v1/financeiro/eventos-financeiros/parcelas/${encodeURIComponent(installmentId)}/baixa`,
       {
@@ -676,14 +745,15 @@ async function ensureSaleSettled(
           composicao_valor: {
             multa: 0,
             juros: 0,
-            valor_bruto: gross,
+            valor_bruto: receivable,
             desconto: 0,
-            taxa: order.feeAmount ?? 0,
-            valor_liquido: order.netAmount ?? gross,
+            taxa: retention,
+            valor_liquido: round2(receivable - retention),
           },
           conta_financeira: financialAccountId,
           metodo_pagamento: contaAzulPaymentMethod(order),
-          observacao: `HumanOS | ordem ${order.externalOrderId}`,
+          observacao: `HumanOS | ordem ${order.externalOrderId} | ${economicsSummaryLine(order.economics)}`
+            .slice(0, 200),
           nsu: order.externalOrderId,
         }),
       },
@@ -789,7 +859,7 @@ async function processJob(
     return "recorded";
   }
 
-  const order = parseZoutiOrder(job.body_json, job.source_platform);
+  const order = await parseOrderWithAdjustments(job.body_json, job.source_platform);
   let orderRow = await getOrder(order.sourcePlatform, order.externalOrderId);
   if (!orderRow) orderRow = await insertOrder(job, order);
   const transition = classifyOrderTransition({
@@ -926,22 +996,200 @@ async function processJob(
   return result;
 }
 
-async function refreshExistingSaleBySequence(ingestSequence: number): Promise<JsonObject> {
+interface InboxRow {
+  id: string;
+  ingest_sequence: number;
+  received_at: string;
+  source_platform: string;
+  source_event_type: string | null;
+  body_json: unknown;
+}
+
+async function getInboxRow(filter: string): Promise<InboxRow | null> {
   const rows = await databaseJson(
-    `/rest/v1/webhook_inbox?select=id,ingest_sequence,received_at,source_platform,source_event_type,body_json&ingest_sequence=eq.${ingestSequence}&limit=1`,
+    `/rest/v1/webhook_inbox?select=id,ingest_sequence,received_at,source_platform,source_event_type,body_json&${filter}&limit=1`,
     { method: "GET" },
-  ) as Array<{
-    id: string;
-    ingest_sequence: number;
-    received_at: string;
-    source_platform: string;
-    source_event_type: string | null;
-    body_json: unknown;
-  }>;
-  const inbox = rows[0];
+  ) as InboxRow[];
+  return rows[0] ?? null;
+}
+
+async function receivableTotal(
+  financialEventId: string,
+): Promise<{ total: number; settled: number; credited: number }> {
+  const installments = await listFinancialInstallments(financialEventId);
+  if (!installments.length) throw new Error("Sale has no financial installments to inspect");
+  let total = 0;
+  let settled = 0;
+  let credited = 0;
+  for (const installment of installments) {
+    const gross = installmentGross(installment);
+    if (gross === null) throw new Error("Conta Azul installment returned no readable value");
+    total += gross;
+    for (const settlement of embeddedSettlements(installment)) {
+      settled += 1;
+      credited += numberValue(object(settlement.valor_composicao)?.valor_liquido) ?? 0;
+    }
+  }
+  return { total: round2(total), settled, credited: round2(credited) };
+}
+
+// Reprocessa vendas já lançadas para o valor líquido. A baixa precisa ser
+// estornada antes do PUT; se o PUT falhar, a baixa é recriada no valor que a
+// parcela ainda tem, para nenhuma venda ficar aberta por causa da correção.
+async function recomputeSaleNet(input: {
+  dryRun: boolean;
+  limit: number;
+  saleNumbers: number[] | null;
+}): Promise<JsonObject> {
+  const filters = [
+    "select=*",
+    "conta_azul_sale_id=not.is.null",
+    "order=conta_azul_sale_number.asc",
+    `limit=${input.limit}`,
+  ];
+  if (input.saleNumbers?.length) {
+    filters.push(`conta_azul_sale_number=in.(${input.saleNumbers.join(",")})`);
+  } else {
+    // Vendas já recalculadas e reversões terminais saem do lote para as chamadas
+    // seguintes avançarem em vez de reexaminar sempre as mesmas vendas.
+    filters.push("last_action=not.eq.sale_net_recomputed");
+    filters.push("normalized_status=not.in.(cancelled,refunded,chargeback)");
+  }
+  const rows = await databaseJson(`/rest/v1/conta_azul_orders?${filters.join("&")}`, { method: "GET" }) as OrderRow[];
+
+  const report: JsonObject[] = [];
+  const totals = { examined: 0, corrected: 0, already_net: 0, skipped: 0, failed: 0, delta: 0 };
+  for (const orderRow of rows) {
+    totals.examined += 1;
+    const entry: JsonObject = {
+      sale_number: orderRow.conta_azul_sale_number,
+      external_order_id: orderRow.external_order_id,
+      normalized_status: orderRow.normalized_status,
+    };
+    try {
+      const inbox = await getInboxRow(`id=eq.${encodeURIComponent(orderRow.last_webhook_id)}`);
+      if (!inbox) throw new Error("Webhook not found for the linked sale");
+      const order = await parseOrderWithAdjustments(inbox.body_json, inbox.source_platform);
+      const target = order.economics.netAmount;
+      entry.gross = order.economics.grossAmount;
+      entry.target_net = target;
+      entry.fees = totalDeducted(order.economics.deductions);
+      entry.coverage = order.economics.coverage;
+
+      let details = await getSaleDetails(orderRow.conta_azul_sale_id!);
+      if (isCancelledSaleSituation(details.situation)) {
+        entry.outcome = "skipped_cancelled";
+        totals.skipped += 1;
+        report.push(entry);
+        continue;
+      }
+      if (!details.financialEventId) throw new Error("Sale has no financial event to inspect");
+      const current = await receivableTotal(details.financialEventId);
+      entry.current_total = current.total;
+      entry.settled_installments = current.settled;
+      entry.currently_credited = current.credited;
+      entry.target_credited = order.economics.platformNetAmount ?? target;
+      entry.delta = round2(current.total - target);
+
+      // Recebível já líquido. Se a baixa não existe, ela é refeita: uma correção
+      // interrompida entre o PUT e a baixa deixaria a parcela aberta para sempre.
+      if (Math.abs(current.total - target) < 0.01) {
+        const needsSettlement = order.normalizedStatus === "paid" && current.settled === 0;
+        entry.outcome = needsSettlement ? "settlement_missing" : "already_net";
+        if (needsSettlement && !input.dryRun) {
+          const mapping = await resolvePlatformMapping(order);
+          entry.upstream_status = await ensureSaleSettled(
+            details,
+            order,
+            mapping.financial_account_id!,
+            target,
+          );
+          entry.outcome = "settlement_restored";
+        }
+        if (entry.outcome === "settlement_restored") totals.corrected += 1;
+        else if (entry.outcome === "settlement_missing") totals.failed += 1;
+        else totals.already_net += 1;
+        if (!input.dryRun && entry.outcome !== "settlement_missing"
+          && orderRow.last_action !== "sale_net_recomputed") {
+          await patchOrder(orderRow.id, { last_action: "sale_net_recomputed" });
+        }
+        report.push(entry);
+        continue;
+      }
+      if (input.dryRun) {
+        entry.outcome = "would_correct";
+        totals.corrected += 1;
+        totals.delta = round2(totals.delta + Number(entry.delta));
+        report.push(entry);
+        continue;
+      }
+
+      const mapping = await resolvePlatformMapping(order);
+      const customerId = orderRow.conta_azul_customer_id ?? await ensureCustomer(order);
+      const productIds: string[] = [];
+      for (const item of order.items) productIds.push(await ensureService(order, item));
+      if (current.settled > 0) await reverseSaleSettlements(details);
+
+      try {
+        const refreshed = await getSaleDetails(details.id);
+        const payload = buildContaAzulSale(order, {
+          customerId,
+          productIds,
+          saleNumber: orderRow.conta_azul_sale_number!,
+          financialAccountId: mapping.financial_account_id!,
+          categoryId: mapping.category_id,
+          situation: "APROVADO",
+          version: refreshed.version,
+          trace: {
+            webhookId: inbox.id,
+            ingestSequence: inbox.ingest_sequence,
+            receivedAt: inbox.received_at,
+            eventType: inbox.source_event_type,
+          },
+        });
+        const response = await contaAzulJson(`/v1/venda/${encodeURIComponent(details.id)}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        }, "sale net recompute");
+        entry.upstream_status = response.status;
+        details = await getSaleDetails(details.id);
+        if (order.normalizedStatus === "paid") {
+          await ensureSaleSettled(details, order, mapping.financial_account_id!, target);
+        }
+      } catch (error) {
+        // A parcela não pode ficar aberta por causa da correção: refaz a baixa
+        // pelo valor que a parcela tem agora, seja o novo ou o antigo.
+        if (current.settled > 0) {
+          await ensureSaleSettled(await getSaleDetails(details.id), order, mapping.financial_account_id!)
+            .catch(() => undefined);
+        }
+        throw error;
+      }
+      await patchOrder(orderRow.id, {
+        conta_azul_customer_id: customerId,
+        conta_azul_sale_version: details.version,
+        last_action: "sale_net_recomputed",
+        last_synced_at: new Date().toISOString(),
+      });
+      entry.outcome = "corrected";
+      totals.corrected += 1;
+      totals.delta = round2(totals.delta + Number(entry.delta));
+    } catch (error) {
+      entry.outcome = "failed";
+      entry.error = (error instanceof Error ? error.message : "unknown error").slice(0, 300);
+      totals.failed += 1;
+    }
+    report.push(entry);
+  }
+  return { operation: "recompute_net", dry_run: input.dryRun, totals, sales: report };
+}
+
+async function refreshExistingSaleBySequence(ingestSequence: number): Promise<JsonObject> {
+  const inbox = await getInboxRow(`ingest_sequence=eq.${ingestSequence}`);
   if (!inbox) throw new Error("Webhook not found for Conta Azul refresh");
 
-  const order = parseZoutiOrder(inbox.body_json, inbox.source_platform);
+  const order = await parseOrderWithAdjustments(inbox.body_json, inbox.source_platform);
   const orderRow = await getOrder(order.sourcePlatform, order.externalOrderId);
   if (!orderRow?.conta_azul_sale_id || !orderRow.conta_azul_sale_number) {
     throw new Error("Conta Azul sale is not linked for refresh");
@@ -1006,7 +1254,21 @@ Deno.serve(async (request: Request): Promise<Response> => {
       batch_size?: unknown;
       operation?: unknown;
       ingest_sequence?: unknown;
+      dry_run?: unknown;
+      limit?: unknown;
+      sale_numbers?: unknown;
     };
+    if (input.operation === "recompute_net") {
+      const requested = Number(input.limit ?? 20);
+      const saleNumbers = Array.isArray(input.sale_numbers)
+        ? input.sale_numbers.map(Number).filter((value) => Number.isSafeInteger(value) && value > 0)
+        : null;
+      return json(await recomputeSaleNet({
+        dryRun: input.dry_run !== false,
+        limit: Number.isSafeInteger(requested) ? Math.min(Math.max(requested, 1), 60) : 20,
+        saleNumbers: saleNumbers?.length ? saleNumbers : null,
+      }));
+    }
     if (input.operation === "refresh_sale") {
       const ingestSequence = Number(input.ingest_sequence);
       if (!Number.isSafeInteger(ingestSequence) || ingestSequence < 1) {

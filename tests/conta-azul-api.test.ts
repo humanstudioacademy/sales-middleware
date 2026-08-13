@@ -17,3 +17,20 @@ test("allows only explicit Conta Azul read resources", () => {
     /Unsupported/,
   );
 });
+
+test("aceita recurso por identificador somente com UUID válido", () => {
+  assert.equal(
+    contaAzulReadPath(new URL(
+      "https://example.test?resource=financial_installments&id=247553d5-7bcf-46c9-9128-90acb1ba7bc1",
+    )),
+    "/v1/financeiro/eventos-financeiros/247553d5-7bcf-46c9-9128-90acb1ba7bc1/parcelas",
+  );
+  assert.throws(
+    () => contaAzulReadPath(new URL("https://example.test?resource=sale_detail&id=../../admin")),
+    /valid identifier/,
+  );
+  assert.throws(
+    () => contaAzulReadPath(new URL("https://example.test?resource=sale_detail")),
+    /valid identifier/,
+  );
+});

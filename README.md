@@ -164,6 +164,23 @@ Endpoint administrativo de homologação. `GET` encaminha filtros para
 `CONTA_AZUL_ALLOW_TEST_WRITES=true` e o request inclui
 `X-Confirm-Create: CONTA_AZUL_DEVELOPMENT`.
 
+`resource` escolhe o recurso lido, sempre de uma lista fechada: `sales`,
+`financial_accounts`, `categories`, `people`, `products`, `next_sale_number` e,
+para conferir uma venda específica, `sale_detail`, `financial_installments` e
+`installment_settlements` — estes três exigem `id` e só aceitam UUID, para o
+parâmetro nunca virar caminho arbitrário na API.
+
+```bash
+curl -s -G "$SUPABASE_URL/functions/v1/conta-azul-api" \
+  --data-urlencode "resource=financial_installments" \
+  --data-urlencode "id=<id do evento financeiro>" \
+  -H "Authorization: Bearer $INTEGRATION_ADMIN_SECRET"
+```
+
+O valor da parcela vem em `valor_composicao.valor_bruto`; `valor_pago` reflete
+apenas o que já foi baixado e é zero enquanto a parcela está aberta. As baixas
+já vêm embutidas em `baixas`, com a composição de cada uma.
+
 ### `POST /functions/v1/conta-azul-worker`
 
 Worker protegido por `CRON_SECRET` (ou pelo segredo administrativo). Apenas uma
@@ -247,7 +264,8 @@ supabase/
 │   ├── 20260802123000_support_conta_azul_service_links.sql
 │   ├── 20260802130000_claim_integration_jobs_by_platform.sql
 │   ├── 20260802131000_add_human_os_worker_lease.sql
-│   └── 20260803000000_create_student_portal_destination.sql
+│   ├── 20260803000000_create_student_portal_destination.sql
+│   └── 20260812000000_create_platform_fee_adjustments.sql
 └── functions/
     ├── _shared/
     ├── conta-azul-api/
@@ -260,6 +278,7 @@ supabase/
 scripts/load-test.ts
 tests/
 ├── health.test.ts
+├── sale-economics.test.ts
 ├── student-portal.test.ts
 └── webhook.test.ts
 ```
@@ -368,6 +387,109 @@ sequência processada. Toda decisão fica em auditoria append-only.
 Referências oficiais: [autenticação OAuth](https://developers.contaazul.com/auth),
 [renovação do token](https://developers.contaazul.com/renewingaccesstoken) e
 [API de vendas](https://developers.contaazul.com/openapi/venda/paths/~1v1~1venda~1busca/get).
+
+## Valor líquido: o que a Conta Azul recebe
+
+A venda entra na Conta Azul já sem a tarifa da plataforma, nunca pelo valor
+cobrado do cliente. `supabase/functions/_shared/sale-economics.ts` concentra
+essa régua para todas as plataformas: parte do valor pago, desconta a tarifa e
+chega ao valor lançado.
+
+**A régua é a tarifa da plataforma.** Juros de parcelamento retidos pelo gateway
+não descontam a receita: eles ficam descritos na venda e entram como `taxa` na
+baixa, para o saldo bancário fechar no valor creditado sem tirar da receita algo
+que o cliente pagou.
+
+Na Zouti a cadeia sai inteira do próprio webhook:
+
+```text
+Valor pago pelo cliente                                    R$ 2.782,45
+(-) Tarifa da plataforma Zouti (payment.fee)               R$   102,14
+(=) Valor líquido lançado na Conta Azul                    R$ 2.680,31
+
+Retido e mantido na receita:
+    Juros de parcelamento retidos                          R$   342,08
+    (interest_amount R$ 402,45 - interest_transfer R$ 60,37)
+Valor efetivamente creditado (payment.net_amount)          R$ 2.338,23
+```
+
+Na Hotmart o valor lançado é a comissão do produtor, calculada sobre o valor da
+oferta — os juros do parcelamento nunca entram nessa comissão:
+
+```text
+Valor da oferta (purchase.price)                           R$ 2.679,00
+(-) Tarifa Hotmart (commissions MARKETPLACE)               R$   151,02
+(-) Tarifa fixa Hotmart (resíduo price - comissões)        R$     1,00
+(=) Valor líquido lançado na Conta Azul (PRODUCER)         R$ 2.526,98
+
+Retido e mantido fora da receita:
+    Juros de parcelamento (full_price R$ 3.324,84 em 12x)  R$   645,84
+```
+
+A composição é gravada em `observacoes` e `observacoes_pagamento` da venda, na
+descrição de cada item e na descrição da parcela, para a conferência não
+depender de abrir o extrato da plataforma.
+
+Consequências no lançamento:
+
+- o valor dos itens é o líquido, rateado na proporção do preço de oferta;
+- a parcela do recebível nasce sem a tarifa, então a baixa nunca a desconta de
+  novo; `taxa` na baixa é só a retenção mantida na receita e
+  `valor_liquido = valor_bruto - taxa` bate com o depósito da plataforma;
+- venda com líquido zero ou negativo para com erro em vez de ser lançada.
+
+Quando a plataforma não descreve toda a cobrança — pagamento dividido em que o
+bloco `payment` cobre só uma perna, ou venda em moeda estrangeira — apenas a
+parte comprovada é deduzida, a venda é marcada como composição parcial e a
+observação diz exatamente qual valor ficou sem dados de tarifa.
+
+### Tarifas que só existem no extrato
+
+Antecipação, saque e ajustes de conciliação não chegam no webhook da venda.
+Eles entram em `platform_fee_adjustments`, por transação, e passam a descontar
+do líquido com o rótulo informado:
+
+```sql
+insert into public.platform_fee_adjustments
+  (source_platform, external_reference, code, label, amount, detail, source_document)
+values
+  ('hotmart', 'HP3930457062', 'hotmart_anticipation_fee', 'Tarifa Hotmart (antecipação)',
+   143.35, 'Antecipação de recebíveis', 'extrato 2026-05');
+```
+
+Com o ajuste acima, uma comissão de R$ 2.847,03 passa a ser lançada como
+R$ 2.703,68, com as duas linhas descritas na venda.
+
+### Recalcular vendas já lançadas
+
+O worker aceita a operação `recompute_net`, que compara o recebível atual com o
+líquido e corrige o que estiver fora. Ela estorna a baixa, atualiza a venda e
+refaz a baixa no valor líquido; se o `PUT` falhar, a baixa é recriada para
+nenhuma venda ficar aberta por causa da correção. Vendas canceladas são
+ignoradas, porque a Conta Azul recusa `PUT` sobre venda cancelada.
+
+Duas armadilhas da API, ambas encontradas em produção e já tratadas:
+
+- depois do `PUT`, a lista de parcelas ainda devolve o valor antigo por alguns
+  segundos. Baixar por esse valor é recusado com _"A soma do Valor nominal das
+  Baixas não deve exceder o valor nominal da Parcela"_ e deixa a parcela
+  `ATRASADO`. A baixa espera a parcela refletir o novo total e, se a propagação
+  não terminar, acompanha proporcionalmente em vez de exceder o nominal;
+- um recebível já líquido mas sem baixa não pode ser tratado como "já correto",
+  senão a parcela fica aberta para sempre. A operação detecta isso e refaz a
+  baixa (`settlement_restored`), então rodá-la de novo conserta uma correção
+  interrompida no meio.
+
+```bash
+curl -s -X POST "$SUPABASE_URL/functions/v1/conta-azul-worker" \
+  -H "Authorization: Bearer $INTEGRATION_ADMIN_SECRET" \
+  -H "content-type: application/json" \
+  -d '{"operation":"recompute_net","dry_run":true,"limit":60}'
+```
+
+`dry_run` é o padrão: sem `"dry_run":false` nada é escrito. O retorno traz, por
+venda, o bruto, o líquido de destino, as tarifas, o recebível atual e a
+diferença. `sale_numbers` restringe a execução a vendas específicas.
 
 ## Contrato AgentLab → portal do aluno
 
