@@ -106,6 +106,23 @@ Os pedidos pulados foram reprocessados e as matrículas já concedidas foram
 reentregues com o acesso correto. O portal é idempotente e não dispara e-mail,
 então a reentrega não incomoda quem já tinha acesso.
 
+### Cobertura final
+
+| Origem | Pedidos pagos elegíveis | Com acesso | Sem matrícula |
+|---|---|---|---|
+| Zouti | 431 | 431 | 0 |
+| Hotmart (Academy Pass, desde 02/08) | 41 | 41 | 0 |
+
+As matrículas em `pending` são pedidos que ainda não foram pagos, e as
+`revoked` são reembolsos — 16 na Zouti e 14 na Hotmart, todos com o pedido
+reembolsado na origem.
+
+## Estado das filas no fechamento
+
+Nenhum item pendente em nenhum destino. Os três únicos registros em dead-letter
+são o mesmo recibo de teste da sequência 3858, arquivado de propósito em cada
+destino. Nenhuma falha de entrega em aberto.
+
 ## 4. Falhas de infraestrutura corrigidas no caminho
 
 - A seleção do próximo item da fila levava cerca de 7 segundos e estourava o
