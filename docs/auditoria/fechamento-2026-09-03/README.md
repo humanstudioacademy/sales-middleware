@@ -69,7 +69,14 @@ pagou, e o código `HP…` no NSU e nas observações.
 
 ## 3. Portal do Agent Lab
 
-Duas causas deixavam comprador sem acesso, as duas corrigidas:
+Três causas deixavam comprador sem acesso, as três corrigidas:
+
+0. **A fila do portal nunca recebeu os eventos anteriores à sua criação.** O
+   destino foi criado em 03/08, um dia depois de a ingestão começar, e o
+   gatilho de ingresso só enfileira o que entra depois dele. Os webhooks das
+   sequências 1388 a 3111 — 1.724 recibos — nunca tiveram item nessa fila, e
+   por isso não havia o que processar mesmo com a oferta cadastrada. Esta é a
+   causa da maior parte dos compradores de agosto sem acesso.
 
 1. **Academy Pass não estava cadastrado como oferta.** Ele dá acesso ao portal,
    mas não existia em `student_portal_offers`. Todo pedido em que era o único
