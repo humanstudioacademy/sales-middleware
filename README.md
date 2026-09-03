@@ -483,9 +483,33 @@ A virada tem ordem obrigatória:
 
 Reembolsos e chargebacks de compras anteriores à data de corte não têm venda
 vinculada e ficam registrados em `conta_azul_orders` com `last_action =
-cancel_without_sale`; o estorno desses lançamentos nativos é manual. O
-mapeamento Hotmart já aponta para `Hotmart - Conta Corrente` e a categoria
-`1.06 Cursos Online B2C`, e nasce com `enabled = false`.
+cancel_without_sale`; o estorno desses lançamentos de outra fonte é manual. O
+mapeamento Hotmart aponta para `Hotmart - Conta Corrente` e a categoria
+`1.06 Cursos Online B2C`.
+
+### Virada retroativa: levar o passado sem lançar duas vezes
+
+Quando a outra fonte já lançou parte do período que o middleware deve cobrir,
+a data de corte sozinha não resolve: recuá-la lançaria de novo o que já existe.
+O mecanismo é a tabela `conta_azul_external_postings`: toda transação listada
+nela nunca vira venda (`last_action = recorded_external_posting`), com o corte
+em qualquer data.
+
+1. `node --env-file=.env scripts/reconcile-hotmart-conta-azul.ts --ours <csv>
+   --out <dir> --since 2026-07-01` lê os lançamentos da conta Hotmart na Conta
+   Azul (o SquadHub gravava o `HP…` na nota da parcela) e cruza com as
+   transações do middleware. Sai `reconciliacao-hotmart.csv` (lançado,
+   duplicado, faltando), `external-postings.json` e a lista de lançamentos sem
+   transação nossa.
+2. `node --env-file=.env scripts/load-external-postings.ts --file
+   <dir>/external-postings.json` grava o que já existe lá, inclusive os ids dos
+   lançamentos em dobro (`duplicate_event_ids`) para o financeiro excluir.
+3. Recuar `sync_orders_created_from` para o início do período desejado.
+4. `node --env-file=.env scripts/sync-conta-azul-orders.ts --sequences <arquivo>`
+   com a sequência do último evento pago de cada transação faltante. A
+   operação `sync_order` do worker aplica o estado atual pelo mesmo caminho da
+   fila, sem ACK de fila, sob o mesmo lease global, e recusa um webhook mais
+   antigo que o último estado da ordem.
 
 ## Contrato AgentLab → portal do aluno
 

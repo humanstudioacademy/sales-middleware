@@ -17,7 +17,7 @@
  * Nada é gravado na Conta Azul nem no banco por aqui.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const HOTMART_ACCOUNT = "494bacd8-d9d4-45ce-907f-5977188cbb56";
@@ -90,6 +90,7 @@ interface EventSummary {
   eventId: string;
   reference: string | null;
   origin: string | null;
+  hotmartEvent: string | null;
   customer: string | null;
   customerId: string | null;
   description: string;
@@ -100,18 +101,48 @@ interface EventSummary {
   firstInstallmentId: string;
 }
 
+const cacheDir = join(outDir, "cache");
+mkdirSync(cacheDir, { recursive: true });
+
+async function cached(key: string, load: () => Promise<unknown>): Promise<unknown> {
+  const file = join(cacheDir, `${key}.json`);
+  if (existsSync(file)) return JSON.parse(readFileSync(file, "utf8"));
+  const value = await load();
+  writeFileSync(file, JSON.stringify(value));
+  return value;
+}
+
+/**
+ * O SquadHub não preenche `codigo_referencia` via API; o código da transação
+ * vai na `nota` da parcela ("... | Transação: HP… | ..."), junto com o evento
+ * Hotmart que gerou o lançamento. É daí que sai a referência.
+ */
+function referenceFrom(detail: Record<string, unknown>, event: Record<string, unknown>): string | null {
+  if (typeof event.codigo_referencia === "string" && event.codigo_referencia.trim()) return event.codigo_referencia.trim();
+  const nota = typeof detail.nota === "string" ? detail.nota : "";
+  const match = nota.match(/Transa[cç][aã]o:\s*(HP[0-9A-Z]+)/i);
+  return match ? match[1].toUpperCase() : null;
+}
+
 async function describeEvent(installment: Installment): Promise<EventSummary | null> {
-  const detail = await contaAzul({ resource: "installment", id: installment.id }) as Record<string, unknown>;
+  const detail = await cached(`installment-${installment.id}`, () =>
+    contaAzul({ resource: "installment", id: installment.id })) as Record<string, unknown>;
   const event = (detail.evento ?? {}) as Record<string, unknown>;
   const eventId = typeof event.id === "string" ? event.id : null;
   if (!eventId) return null;
-  const parts = await contaAzul({ resource: "event_installments", id: eventId }) as unknown;
+  const parts = await cached(`event-${eventId}`, () => contaAzul({ resource: "event_installments", id: eventId })) as unknown;
   const list = Array.isArray(parts) ? parts : Array.isArray((parts as { itens?: unknown[] })?.itens) ? (parts as { itens: unknown[] }).itens : [];
-  const total = list.reduce((sum: number, item) => sum + Number((item as { valor?: unknown }).valor ?? 0), 0);
+  const total = list.reduce(
+    (sum: number, item) =>
+      sum + Number(((item as { valor_composicao?: { valor_bruto?: unknown } }).valor_composicao?.valor_bruto) ?? (item as { valor?: unknown }).valor ?? 0),
+    0,
+  );
+  const referencia = (event.referencia ?? {}) as Record<string, unknown>;
   return {
     eventId,
-    reference: typeof event.codigo_referencia === "string" ? event.codigo_referencia.trim() : null,
-    origin: typeof event.origem === "string" ? event.origem : null,
+    reference: referenceFrom(detail, event),
+    origin: typeof referencia.origem === "string" ? referencia.origem : null,
+    hotmartEvent: (typeof detail.nota === "string" && detail.nota.match(/Evento:\s*([A-Z_]+)/)?.[1]) || null,
     customer: installment.cliente?.nome ?? null,
     customerId: installment.cliente?.id ?? null,
     description: installment.descricao,
@@ -199,7 +230,7 @@ for (const order of ours) {
       amount: keep.total,
       competence_date: keep.competence,
       duplicate_event_ids: duplicates,
-      note: `${keep.description} | ${keep.installments} parcela(s) | cliente ${keep.customer ?? "?"}`,
+      note: `${keep.description} | ${keep.hotmartEvent ?? "?"} | ${keep.installments} parcela(s) | cliente ${keep.customer ?? "?"}`,
     });
   }
 }
