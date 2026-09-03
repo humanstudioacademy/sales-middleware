@@ -361,15 +361,18 @@ async function enabledPlatforms(): Promise<string[]> {
 }
 
 /**
- * Ordens criadas na origem antes da data de corte da plataforma já foram
- * lançadas por outro caminho (a integração nativa, por exemplo). Elas são
- * registradas e acompanhadas localmente, mas nunca viram uma venda nova.
+ * Pagamentos confirmados na origem antes da data de corte da plataforma já
+ * foram lançados por outro caminho (um app de terceiro, por exemplo). Eles são
+ * registrados e acompanhados localmente, mas nunca viram uma venda nova. O
+ * instante comparado é o da aprovação do pagamento — é nele que a outra fonte
+ * criava o registro — e não o da criação da ordem, senão um boleto emitido
+ * antes do corte e pago depois ficaria sem lançamento em lugar nenhum.
  */
-function createdBeforeCutover(order: CommerceOrder, mapping: PlatformMapping): boolean {
+function paidBeforeCutover(order: CommerceOrder, mapping: PlatformMapping): boolean {
   if (!mapping.sync_orders_created_from) return false;
   const cutover = Date.parse(mapping.sync_orders_created_from);
-  const createdAt = Date.parse(order.sourceCreatedAt);
-  return Number.isFinite(cutover) && Number.isFinite(createdAt) && createdAt < cutover;
+  const paidAt = Date.parse(order.sourcePaidAt ?? order.sourceUpdatedAt);
+  return Number.isFinite(cutover) && Number.isFinite(paidAt) && paidAt < cutover;
 }
 
 async function fingerprint(value: unknown): Promise<string> {
@@ -811,7 +814,7 @@ async function processJob(
   }
 
   const mapping = await resolvePlatformMapping(order);
-  if (action === "upsert_sale" && !orderRow.conta_azul_sale_id && createdBeforeCutover(order, mapping)) {
+  if (action === "upsert_sale" && !orderRow.conta_azul_sale_id && paidBeforeCutover(order, mapping)) {
     await finalizeOrder(job, orderRow, order, "recorded_before_cutover", 200);
     return "recorded";
   }

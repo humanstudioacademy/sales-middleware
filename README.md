@@ -450,15 +450,20 @@ cliente, em vez de derrubar a venda.
 
 ### Virada da integração nativa para o middleware
 
-A Conta Azul tem uma integração nativa com a Hotmart. Ela lança um "Lançamento
-Financeiro" por evento recebido (aprovada, completa…), o que produz os
-registros duplicados por transação. Enquanto ela estiver ligada, o middleware
-**não pode** lançar Hotmart: seriam duas fontes para a mesma compra. A virada
-tem ordem obrigatória:
+Até 03/09/2026 um app de terceiro (SquadHub, cadastrado como usuário
+administrador da Conta Azul) criava um "Lançamento Financeiro" parcelado por
+evento recebido da Hotmart (aprovada, completa…), o que produzia os registros
+duplicados por transação. A integração nativa Hotmart da Conta Azul faria o
+mesmo se estivesse conectada. Enquanto qualquer outra fonte estiver ligada, o
+middleware **não pode** lançar Hotmart: seriam duas fontes para a mesma compra.
+A virada tem ordem obrigatória:
 
-1. desligar a integração nativa Hotmart na Conta Azul e anotar o instante;
-2. registrar a data de corte no mapeamento, para que compras anteriores (já
-   lançadas pela integração nativa) sejam apenas acompanhadas localmente:
+1. desligar a outra fonte (usuário ou app na Conta Azul, disparo na Hotmart) e
+   anotar o instante;
+2. registrar a data de corte no mapeamento. Pagamentos **aprovados** antes dela
+   (já lançados pela outra fonte) são apenas acompanhados localmente; a
+   comparação é pela data de aprovação, não pela criação da ordem, para um
+   boleto emitido antes do corte e pago depois não ficar sem lançamento:
 
    ```sql
    update public.conta_azul_platform_mappings

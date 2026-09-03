@@ -363,6 +363,7 @@ export function parseHotmartOrder(body: unknown): CommerceOrder {
     normalizedStatus: normalizeHotmartStatus(sourceStatus),
     sourceCreatedAt: createdAt,
     sourceUpdatedAt: updatedAt,
+    sourcePaidAt: epochToIso(purchase.approved_date),
     currency: amounts.currency,
     subtotalAmount: amounts.subtotalAmount,
     totalAmount: amounts.totalAmount,

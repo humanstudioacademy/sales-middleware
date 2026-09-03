@@ -44,6 +44,8 @@ export interface CommerceOrder {
   normalizedStatus: NormalizedOrderStatus;
   sourceCreatedAt: string;
   sourceUpdatedAt: string;
+  /** Instante em que a origem confirmou o pagamento; null quando não informado. */
+  sourcePaidAt: string | null;
   currency: string;
   subtotalAmount: number | null;
   totalAmount: number;
@@ -334,6 +336,7 @@ export function parseZoutiOrder(body: unknown, sourcePlatform: string): Commerce
     normalizedStatus,
     sourceCreatedAt: createdAt,
     sourceUpdatedAt: updatedAt,
+    sourcePaidAt: optionalString(payment?.paid_at) ? isoDateTime(payment?.paid_at, "payment.paid_at") : null,
     currency: requiredString(root.currency, "currency").toUpperCase(),
     subtotalAmount: optionalMoney(root.amount_subtotal_in_brl, root.amount_subtotal, "amount_subtotal"),
     totalAmount,
