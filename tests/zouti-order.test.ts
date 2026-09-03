@@ -309,6 +309,69 @@ test("keeps a partially refunded sale alive and annotates it instead of cancelli
   assert.match(String(sale.observacoes_pagamento), /Valor reembolsado: R\$ 50,00/);
 });
 
+test("keeps free bonus items out of the Conta Azul sale and refuses an all-free sale", () => {
+  const withBonus = parseZoutiOrder({
+    ...paidPayload,
+    items: [
+      ...paidPayload.items,
+      { product_id: "prod_bonus", name: "Bônus", quantity: 1, amount: 0, amount_in_brl: 0 },
+    ],
+  }, "zouti");
+  const sale = buildContaAzulSale(withBonus, {
+    customerId: "customer-uuid",
+    productIds: ["product-uuid", "bonus-uuid"],
+    saleNumber: 1,
+    financialAccountId: "account-uuid",
+    categoryId: null,
+    situation: "APROVADO",
+  });
+  assert.equal(sale.itens.length, 1);
+  assert.equal(sale.itens[0].id, "product-uuid");
+  assert.equal(sale.itens[0].valor, 97.9);
+
+  // Desconto maior que o primeiro item: R$ 123,45 cobrados por itens de
+  // R$ 49,90 e R$ 197,00. Ratear proporcionalmente mantém os dois positivos.
+  const discounted = parseZoutiOrder({
+    ...paidPayload,
+    amount_total: 12345,
+    amount_total_in_brl: 123.45,
+    items: [
+      { ...paidPayload.items[0], product_id: "prod_a", amount: 4990, amount_in_brl: 49.9 },
+      { ...paidPayload.items[0], product_id: "prod_b", amount: 19700, amount_in_brl: 197 },
+    ],
+  }, "zouti");
+  const discountedSale = buildContaAzulSale(discounted, {
+    customerId: "c",
+    productIds: ["pa", "pb"],
+    saleNumber: 2,
+    financialAccountId: "a",
+    categoryId: null,
+    situation: "APROVADO",
+  });
+  assert.deepEqual(discountedSale.itens.map((item) => item.valor), [24.95, 98.5]);
+  assert.equal(discountedSale.condicao_pagamento.parcelas[0].valor, 123.45);
+
+  const free = parseZoutiOrder({
+    ...paidPayload,
+    amount_total: 0,
+    amount_total_in_brl: 0,
+    items: [{ ...paidPayload.items[0], amount: 0, amount_in_brl: 0 }],
+  }, "zouti");
+  assert.equal(free.totalAmount, 0);
+  assert.throws(
+    () =>
+      buildContaAzulSale(free, {
+        customerId: "c",
+        productIds: ["p"],
+        saleNumber: 1,
+        financialAccountId: "a",
+        categoryId: null,
+        situation: "APROVADO",
+      }),
+    /positive value/,
+  );
+});
+
 test("resumes the same queue delivery after persisting its order row", () => {
   const order = parseZoutiOrder(paidPayload, "zouti");
   assert.equal(classifyOrderTransition({

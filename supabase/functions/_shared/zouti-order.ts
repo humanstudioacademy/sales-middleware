@@ -676,10 +676,30 @@ export function buildContaAzulSale(
   if (input.productIds.length !== order.items.length) {
     throw new Error("Conta Azul product mapping is incomplete");
   }
+  // O total cobrado manda. Desconto ou acréscimo no pedido é rateado
+  // proporcionalmente entre os itens, para nenhum item ficar negativo quando o
+  // desconto é maior que o primeiro item; o resíduo de arredondamento vai para o
+  // item de maior valor. A Conta Azul recusa item com valor zero, então brindes
+  // e bônus gratuitos ficam só na descrição da venda, fora da lista de itens.
+  const round = (value: number) => Math.round(value * 100) / 100;
   const values = order.items.map((item) => item.unitAmount);
-  const mappedTotal = order.items.reduce((sum, item, index) => sum + item.quantity * values[index], 0);
-  const difference = Math.round((order.totalAmount - mappedTotal) * 100) / 100;
-  values[0] = Math.round((values[0] + difference / order.items[0].quantity) * 100) / 100;
+  const lineTotal = () => order.items.reduce((sum, item, index) => sum + item.quantity * values[index], 0);
+  const mappedTotal = lineTotal();
+  if (mappedTotal > 0 && Math.abs(order.totalAmount - mappedTotal) >= 0.005) {
+    const scale = order.totalAmount / mappedTotal;
+    for (let index = 0; index < values.length; index += 1) values[index] = round(values[index] * scale);
+  }
+  const residual = round(order.totalAmount - lineTotal());
+  if (residual !== 0) {
+    const anchor = values.reduce((best, value, index) => (value > values[best] ? index : best), 0);
+    values[anchor] = round(values[anchor] + residual / order.items[anchor].quantity);
+  }
+  const billable = order.items
+    .map((item, index) => ({ item, index, value: values[index] }))
+    .filter(({ value }) => value > 0);
+  if (billable.length === 0) {
+    throw new Error("Conta Azul sale requires at least one item with a positive value");
+  }
 
   const sale: JsonObject = {
     id_cliente: input.customerId,
@@ -688,7 +708,7 @@ export function buildContaAzulSale(
     data_venda: order.sourceCreatedAt.slice(0, 10),
     observacoes: saleDescription(order, input.trace),
     observacoes_pagamento: paymentDescription(order),
-    itens: order.items.map((item, index) => ({
+    itens: billable.map(({ item, index, value }) => ({
       id: input.productIds[index],
       descricao: [
         item.name,
@@ -697,7 +717,7 @@ export function buildContaAzulSale(
         item.type ? `Tipo: ${item.type}` : null,
       ].filter(Boolean).join(" | ").slice(0, 400),
       quantidade: item.quantity,
-      valor: values[index],
+      valor: value,
     })),
     condicao_pagamento: {
       tipo_pagamento: contaAzulPaymentMethod(order),

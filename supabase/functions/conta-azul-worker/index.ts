@@ -818,6 +818,12 @@ async function processJob(
     await finalizeOrder(job, orderRow, order, "recorded_before_cutover", 200);
     return "recorded";
   }
+  // Pedido pago sem valor (cupom de 100%, cortesia) não tem evento financeiro:
+  // a Conta Azul recusa item com valor zero. Fica registrado localmente.
+  if (action === "upsert_sale" && !orderRow.conta_azul_sale_id && order.totalAmount <= 0) {
+    await finalizeOrder(job, orderRow, order, "recorded_zero_value", 200);
+    return "recorded";
+  }
 
   let allocated = await allocateSaleNumber(orderRow);
   orderRow = allocated.row;
