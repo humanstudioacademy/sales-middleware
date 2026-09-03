@@ -34,7 +34,21 @@ entrou.
 
 - 185 vendas afetadas (159 em agosto, 26 em setembro)
 - R$ 47.721,31 de caixa a mais
-- Corrigido no código e todas as baixas refeitas
+- Corrigido no código e todas as 185 baixas refeitas
+
+Depois da correção, o caixa registrado na Conta Azul:
+
+| Mês | Vendas | Recebido | Pago pelos clientes |
+|---|---|---|---|
+| Agosto | 328 | R$ 459.581,36 | R$ 521.536,13 |
+| Setembro | 130 | R$ 31.153,86 | R$ 34.557,15 |
+
+Confrontando venda a venda com o líquido informado pela Zouti, 452 das 458
+batem ao centavo. As 6 restantes são pagamentos divididos, e a diferença é
+exatamente o valor das partes cuja tarifa a Zouti não informa: R$ 7.651,40 em
+agosto e R$ 44,90 em setembro. Está tudo em
+`03-pagamento-dividido-tarifa-pendente.csv`; assim que a tarifa real for
+registrada em `platform_fee_adjustments`, a baixa passa a refleti-la.
 
 ### Pedidos reembolsados sem venda lançada
 
