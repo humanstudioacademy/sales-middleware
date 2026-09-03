@@ -6,7 +6,9 @@ import {
   buildContaAzulSale,
   classifyOrderTransition,
   classifyInboundCommerceEvent,
+  contaAzulMobilePhone,
   contaAzulPaymentMethod,
+  contaAzulSku,
   desiredOrderAction,
   isCancelledSaleSituation,
   normalizeOrderStatus,
@@ -26,6 +28,29 @@ test("recognizes the durable Zouti order marker in Conta Azul observations", () 
   assert.equal(saleObservationsBelongToOrder("Pedido Zouti: ord_123", "ord_123"), true);
   assert.equal(saleObservationsBelongToOrder("HumanOS | ordem ord_123", "ord_123"), true);
   assert.equal(saleObservationsBelongToOrder("Pedido Zouti: ord_other", "ord_123"), false);
+});
+
+test("omits phones Conta Azul would reject instead of failing the sale", () => {
+  assert.equal(contaAzulMobilePhone("11999999999"), "11999999999");
+  assert.equal(contaAzulMobilePhone("999999999"), "999999999");
+  assert.equal(contaAzulMobilePhone("1133334444"), null);
+  assert.equal(contaAzulMobilePhone("542214358187"), null);
+  assert.equal(contaAzulMobilePhone("351910677536"), null);
+  assert.equal(contaAzulMobilePhone(null), null);
+
+  const foreign = parseZoutiOrder({
+    ...paidPayload,
+    customer: { ...paidPayload.customer, phone: "+351 910 677 536" },
+  }, "zouti");
+  const person = buildContaAzulPerson(foreign);
+  assert.equal(person.telefone_celular, undefined);
+  assert.match(String(person.observacao), /telefone informado: 351910677536/);
+});
+
+test("prefixes catalog SKUs by platform so links never collide", () => {
+  assert.equal(contaAzulSku("prod_abc123"), "ZO00000000PRODABC123");
+  assert.equal(contaAzulSku("prod_abc123", "zouti"), "ZO00000000PRODABC123");
+  assert.equal(contaAzulSku("7295817", "hotmart"), "HM000000000007295817");
 });
 
 test("reconciles customer matches across document, email and phone", () => {

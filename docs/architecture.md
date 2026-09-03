@@ -68,12 +68,25 @@ idempotência no destino sempre que a API permitir: nenhum sistema distribuído
 consegue impedir uma duplicação se o terceiro executar a chamada e a conexão cair
 antes do ACK local.
 
-No caso da Conta Azul, a identidade é `(source_platform, external_order_id)` e o
-número da venda é a chave operacional de recuperação. Antes do `POST`, o worker
-consulta `/v1/venda/busca?numeros=...` e confirma o ID externo nas observações.
-Assim, uma reexecução após perda do ACK recupera o UUID da venda já criada; se o
-número tiver sido ocupado por outra venda, ele é realocado. O vínculo local por
+No caso da Conta Azul, a identidade é `(source_platform, external_order_id)` —
+`ord_…` na Zouti, o código de transação `HP…` na Hotmart — e o número da venda é
+a chave operacional de recuperação. Cada plataforma tem o seu adaptador de
+JSON, mas todos produzem o mesmo `CommerceOrder`, e o restante do fluxo é
+idêntico. Antes do `POST`, o worker consulta `/v1/venda/busca?numeros=...` e
+confirma o ID externo nas observações. Assim, uma reexecução após perda do ACK
+recupera o UUID da venda já criada; se o número tiver sido ocupado por outra
+venda, ele é realocado. O número é reservado no banco por
+`reserve_conta_azul_sale_number`, que nunca devolve um número já reservado por
+outra ordem, mesmo que essa ordem não tenha chegado a criar a venda. Depois de
+vinculada, a venda é imutável na linha (trigger): um evento posterior da mesma
+transação atualiza a venda existente, nunca cria outra. O vínculo local por
 ordem, `webhook_id`, fingerprint, número e UUID mantém a auditoria.
+
+O worker reclama da fila apenas as plataformas com mapeamento habilitado em
+`conta_azul_platform_mappings`. Uma plataforma pode ter data de corte
+(`sync_orders_created_from`): ordens criadas na origem antes dela são
+acompanhadas localmente sem criar venda, o que permite virar de uma integração
+nativa que já lançou o passado sem lançar duas vezes.
 
 Eventos Zouti auxiliares e plataformas ainda sem adaptador são confirmados na
 fila somente depois de serem gravados em `conta_azul_deferred_events`. Isso evita

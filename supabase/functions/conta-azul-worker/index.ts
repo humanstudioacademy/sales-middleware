@@ -1,18 +1,18 @@
 import { contaAzulRequest } from "../_shared/conta-azul.ts";
 import { databaseRequest, requiredEnvironment } from "../_shared/database.ts";
 import { authenticateBearerToken, sha256Hex } from "../_shared/webhook.ts";
+import { classifyCommerceEvent, parseCommerceOrder } from "../_shared/commerce-order.ts";
 import {
   buildContaAzulPerson,
   buildContaAzulSale,
-  classifyInboundCommerceEvent,
   classifyOrderTransition,
   contaAzulPaymentMethod,
   contaAzulSku,
   type CommerceItem,
   type CommerceOrder,
   desiredOrderAction,
+  type InboundCommerceEvent,
   isCancelledSaleSituation,
-  parseZoutiOrder,
   reconcileCustomerMatchIds,
   saleObservationsBelongToOrder,
 } from "../_shared/zouti-order.ts";
@@ -58,6 +58,7 @@ interface PlatformMapping {
   category_id: string | null;
   category_name: string | null;
   enabled: boolean;
+  sync_orders_created_from: string | null;
 }
 
 interface CustomerLink {
@@ -229,7 +230,7 @@ async function getDeferredEvent(webhookId: string): Promise<boolean> {
 
 async function deferEvent(
   job: ClaimedJob,
-  event: Exclude<ReturnType<typeof classifyInboundCommerceEvent>, { disposition: "process_order" }>,
+  event: Exclude<InboundCommerceEvent, { disposition: "process_order" }>,
 ): Promise<void> {
   await databaseJson(
     "/rest/v1/conta_azul_deferred_events?on_conflict=webhook_id",
@@ -335,71 +336,39 @@ function normalizedLabel(value: unknown): string {
     .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+/**
+ * Ligar uma plataforma na Conta Azul é uma decisão explícita: a linha em
+ * `conta_azul_platform_mappings` precisa existir, estar habilitada e apontar
+ * para uma conta financeira. O worker nunca descobre conta/categoria sozinho —
+ * foi assim que uma integração paralela poderia começar a lançar sem ninguém
+ * ter decidido isso.
+ */
 async function resolvePlatformMapping(order: CommerceOrder): Promise<PlatformMapping> {
   const configured = await getPlatformMapping(order.sourcePlatform);
-  if (configured) {
-    if (!configured.enabled || !configured.financial_account_id) {
-      throw new Error(`Conta Azul platform mapping is disabled or incomplete: ${order.sourcePlatform}`);
-    }
-    return configured;
+  if (!configured || !configured.enabled || !configured.financial_account_id) {
+    throw new Error(`Conta Azul platform mapping is disabled or incomplete: ${order.sourcePlatform}`);
   }
+  return configured;
+}
 
-  const accountsResult = await contaAzulJson(
-    "/v1/conta-financeira?pagina=1&tamanho_pagina=100",
-    { method: "GET" },
-    "financial account lookup",
-  );
-  const platformLabel = normalizedLabel(order.sourcePlatform);
-  const candidates = arrayFrom(accountsResult.value).map(object).filter((account): account is JsonObject => {
-    if (!account) return false;
-    const name = normalizedLabel(account.nome);
-    return name.includes(platformLabel) && String(account.tipo ?? "") === "CONTA_CORRENTE";
-  });
-  if (candidates.length !== 1) {
-    throw new Error(`Conta Azul financial account is not uniquely mapped for platform: ${order.sourcePlatform}`);
-  }
-  const accountId = stringId(candidates[0]);
-  const accountName = typeof candidates[0].nome === "string" ? candidates[0].nome : null;
-  if (!accountId || !accountName) throw new Error("Conta Azul financial account returned no identifier");
-
-  const categoriesResult = await contaAzulJson(
-    "/v1/categorias?pagina=1&tamanho_pagina=100&tipo=RECEITA&apenas_filhos=true&permite_apenas_filhos=true",
-    { method: "GET" },
-    "category lookup",
-  );
-  const searchable = normalizedLabel(order.items.map((item) => `${item.name} ${item.description ?? ""}`).join(" "));
-  const preferred = searchable.includes("workshop")
-    ? "workshop corporativa online"
-    : searchable.includes("saas")
-    ? "saas b2c"
-    : "cursos online b2c";
-  const category = arrayFrom(categoriesResult.value).map(object).find((candidate) =>
-    candidate && normalizedLabel(candidate.nome).includes(preferred)
-  ) ?? null;
-  const categoryId = stringId(category);
-  const categoryName = typeof category?.nome === "string" ? category.nome : null;
-
+async function enabledPlatforms(): Promise<string[]> {
   const rows = await databaseJson(
-    "/rest/v1/conta_azul_platform_mappings?on_conflict=source_platform&select=*",
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        prefer: "resolution=merge-duplicates,return=representation",
-      },
-      body: JSON.stringify({
-        source_platform: order.sourcePlatform,
-        financial_account_id: accountId,
-        financial_account_name: accountName,
-        category_id: categoryId,
-        category_name: categoryName,
-        resolved_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }),
-    },
-  ) as PlatformMapping[];
-  if (!rows[0]) throw new Error("Conta Azul platform mapping could not be persisted");
-  return rows[0];
+    "/rest/v1/conta_azul_platform_mappings?select=source_platform&enabled=is.true&financial_account_id=not.is.null&order=source_platform.asc",
+    { method: "GET" },
+  ) as Array<{ source_platform: string }>;
+  return rows.map((row) => row.source_platform);
+}
+
+/**
+ * Ordens criadas na origem antes da data de corte da plataforma já foram
+ * lançadas por outro caminho (a integração nativa, por exemplo). Elas são
+ * registradas e acompanhadas localmente, mas nunca viram uma venda nova.
+ */
+function createdBeforeCutover(order: CommerceOrder, mapping: PlatformMapping): boolean {
+  if (!mapping.sync_orders_created_from) return false;
+  const cutover = Date.parse(mapping.sync_orders_created_from);
+  const createdAt = Date.parse(order.sourceCreatedAt);
+  return Number.isFinite(cutover) && Number.isFinite(createdAt) && createdAt < cutover;
 }
 
 async function fingerprint(value: unknown): Promise<string> {
@@ -538,7 +507,7 @@ async function ensureService(order: CommerceOrder, item: CommerceItem): Promise<
     return linked.conta_azul_product_id;
   }
 
-  const sku = contaAzulSku(item.sourceId);
+  const sku = contaAzulSku(item.sourceId, order.sourcePlatform);
   const search = await contaAzulJson(
     `/v1/servicos?pagina=1&tamanho_pagina=100&busca_textual=${encodeURIComponent(serviceName)}`,
     { method: "GET" },
@@ -610,10 +579,35 @@ async function nextSaleNumber(): Promise<number> {
   return saleNumber;
 }
 
+async function getOrderById(id: string): Promise<OrderRow> {
+  const rows = await databaseJson(
+    `/rest/v1/conta_azul_orders?select=*&id=eq.${encodeURIComponent(id)}&limit=1`,
+    { method: "GET" },
+  ) as OrderRow[];
+  if (!rows[0]) throw new Error("Conta Azul order disappeared during processing");
+  return rows[0];
+}
+
+/**
+ * A reserva é feita no banco: o número final é o maior entre o candidato da
+ * Conta Azul e o sucessor do maior número já reservado por outra ordem. Assim
+ * uma ordem que reservou um número e nunca chegou a criar a venda não faz a
+ * Conta Azul devolver o mesmo "próximo número" para todas as seguintes.
+ */
+async function reserveSaleNumber(orderRow: OrderRow, candidate: number): Promise<{ row: OrderRow; number: number }> {
+  const reserved = numberValue(await rpc("reserve_conta_azul_sale_number", {
+    p_order_id: orderRow.id,
+    p_candidate: candidate,
+  }));
+  if (!reserved || !Number.isSafeInteger(reserved) || reserved < 1) {
+    throw new Error("Sale number reservation returned an invalid number");
+  }
+  return { row: await getOrderById(orderRow.id), number: reserved };
+}
+
 async function allocateSaleNumber(orderRow: OrderRow): Promise<{ row: OrderRow; number: number }> {
   if (orderRow.conta_azul_sale_number) return { row: orderRow, number: orderRow.conta_azul_sale_number };
-  const saleNumber = await nextSaleNumber();
-  return { row: await patchOrder(orderRow.id, { conta_azul_sale_number: saleNumber, last_action: "syncing" }), number: saleNumber };
+  return await reserveSaleNumber(orderRow, await nextSaleNumber());
 }
 
 async function listFinancialInstallments(financialEventId: string): Promise<JsonObject[]> {
@@ -782,14 +776,17 @@ async function processJob(
     return "no_change";
   }
 
-  const inbound = classifyInboundCommerceEvent(job.body_json, job.source_platform);
+  const inbound = classifyCommerceEvent(job.body_json, job.source_platform);
   if (inbound.disposition === "defer") {
     await deferEvent(job, inbound);
     await complete(job, 200);
     return "recorded";
   }
 
-  const order = parseZoutiOrder(job.body_json, job.source_platform);
+  // A identidade é (plataforma, id da transação na origem). Todo evento da
+  // mesma transação — aprovada, completa, reembolsada, chargeback — cai na
+  // mesma linha e, por consequência, na mesma venda da Conta Azul.
+  const order = parseCommerceOrder(job.body_json, job.source_platform);
   let orderRow = await getOrder(order.sourcePlatform, order.externalOrderId);
   if (!orderRow) orderRow = await insertOrder(job, order);
   const transition = classifyOrderTransition({
@@ -812,6 +809,11 @@ async function processJob(
   }
 
   const mapping = await resolvePlatformMapping(order);
+  if (action === "upsert_sale" && !orderRow.conta_azul_sale_id && createdBeforeCutover(order, mapping)) {
+    await finalizeOrder(job, orderRow, order, "recorded_before_cutover", 200);
+    return "recorded";
+  }
+
   let allocated = await allocateSaleNumber(orderRow);
   orderRow = allocated.row;
   let details: SaleDetails | null;
@@ -822,13 +824,11 @@ async function processJob(
       details = await findSaleByNumber(allocated.number, order.externalOrderId);
     } catch (error) {
       if (!(error instanceof SaleNumberCollisionError)) throw error;
-      const replacement = await nextSaleNumber();
-      if (replacement === allocated.number) throw error;
-      orderRow = await patchOrder(orderRow.id, {
-        conta_azul_sale_number: replacement,
-        last_action: "sale_number_reallocated",
-      });
-      allocated = { row: orderRow, number: replacement };
+      // O número foi ocupado por outra venda na Conta Azul: reserva um número
+      // estritamente novo e confere de novo antes de qualquer POST.
+      const replacement = Math.max(await nextSaleNumber(), allocated.number + 1);
+      allocated = await reserveSaleNumber(orderRow, replacement);
+      orderRow = allocated.row;
       details = await findSaleByNumber(allocated.number, order.externalOrderId);
     }
   }
@@ -941,7 +941,7 @@ async function refreshExistingSaleBySequence(ingestSequence: number): Promise<Js
   const inbox = rows[0];
   if (!inbox) throw new Error("Webhook not found for Conta Azul refresh");
 
-  const order = parseZoutiOrder(inbox.body_json, inbox.source_platform);
+  const order = parseCommerceOrder(inbox.body_json, inbox.source_platform);
   const orderRow = await getOrder(order.sourcePlatform, order.externalOrderId);
   if (!orderRow?.conta_azul_sale_id || !orderRow.conta_azul_sale_number) {
     throw new Error("Conta Azul sale is not linked for refresh");
@@ -1027,25 +1027,43 @@ Deno.serve(async (request: Request): Promise<Response> => {
       const requested = Number(input.batch_size ?? 100);
       const batchSize = Number.isSafeInteger(requested) ? Math.min(Math.max(requested, 1), 300) : 100;
       const result = { claimed: 0, created: 0, updated: 0, recorded: 0, no_change: 0, failed: 0 };
+      // Só plataformas com mapeamento habilitado são reclamadas da fila. Uma
+      // plataforma sem decisão explícita (Hotmart antes da virada, por exemplo)
+      // fica intacta na fila, em ordem, sem tocar a Conta Azul.
+      const enabled = await enabledPlatforms();
+      const platforms = new Set(enabled);
+      let claimed = 0;
 
-      for (let index = 0; index < batchSize; index += 1) {
-        const jobs = await rpc("claim_integration_jobs", {
-          p_destination: "conta_azul",
-          p_batch_size: 1,
-          p_source_platform: "zouti",
-        }) as ClaimedJob[];
-        const job = jobs[0];
-        if (!job) break;
-        result.claimed += 1;
-        try {
-          result[await processJob(job)] += 1;
-        } catch (error) {
-          result.failed += 1;
-          await fail(job, error);
-          break;
+      while (claimed < batchSize && platforms.size > 0) {
+        let progressed = false;
+        for (const platform of [...platforms]) {
+          if (claimed >= batchSize) break;
+          const jobs = await rpc("claim_integration_jobs", {
+            p_destination: "conta_azul",
+            p_batch_size: 1,
+            p_source_platform: platform,
+          }) as ClaimedJob[];
+          const job = jobs[0];
+          if (!job) {
+            platforms.delete(platform);
+            continue;
+          }
+          progressed = true;
+          claimed += 1;
+          result.claimed += 1;
+          try {
+            result[await processJob(job)] += 1;
+          } catch (error) {
+            result.failed += 1;
+            await fail(job, error);
+            // O FIFO da plataforma fica bloqueado até o retry agendado; as
+            // demais plataformas seguem independentes.
+            platforms.delete(platform);
+          }
         }
+        if (!progressed) break;
       }
-      return json(result);
+      return json({ ...result, platforms: enabled });
     } finally {
       await rpc("release_integration_worker_lease", {
         p_destination: "conta_azul",

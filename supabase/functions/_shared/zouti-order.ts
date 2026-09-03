@@ -98,12 +98,43 @@ function optionalString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function brazilianPhone(value: unknown): string | null {
+export function brazilianPhone(value: unknown): string | null {
   let digits = optionalString(value)?.replace(/\D/g, "") ?? "";
   if (digits.startsWith("55") && (digits.length === 12 || digits.length === 13)) {
     digits = digits.slice(2);
   }
   return digits || null;
+}
+
+/**
+ * A Conta Azul só aceita celular como `DD9XXXXXXXX` ou `9XXXXXXXX` e responde
+ * 400 para qualquer outra coisa — telefone estrangeiro, fixo ou incompleto.
+ * Um telefone inválido não pode derrubar a venda: ele é omitido do cadastro e
+ * preservado na observação do cliente.
+ */
+export function contaAzulMobilePhone(value: string | null | undefined): string | null {
+  const digits = value?.replace(/\D/g, "") ?? "";
+  if (/^[1-9][1-9]9\d{8}$/.test(digits) || /^9\d{8}$/.test(digits)) return digits;
+  return null;
+}
+
+export function platformLabel(platform: string): string {
+  const normalized = platform.trim().toLowerCase();
+  if (normalized === "zouti") return "Zouti";
+  if (normalized === "hotmart") return "Hotmart";
+  return normalized ? normalized[0].toUpperCase() + normalized.slice(1) : "Origem";
+}
+
+/**
+ * Marcador durável gravado nas observações da venda. É por ele que uma
+ * reexecução após ACK perdido reconhece a venda já criada para a transação.
+ * O texto da Zouti é mantido byte a byte porque já existe em produção.
+ */
+export function orderReferenceLabel(platform: string): string {
+  const normalized = platform.trim().toLowerCase();
+  if (normalized === "zouti") return "Pedido Zouti";
+  if (normalized === "hotmart") return "Transação Hotmart";
+  return `Pedido ${platformLabel(platform)}`;
 }
 
 function finiteNumber(value: unknown, name: string): number {
@@ -383,8 +414,9 @@ export function saleObservationsBelongToOrder(
   externalOrderId: string,
 ): boolean {
   if (!observations) return false;
-  return observations.includes(`Pedido Zouti: ${externalOrderId}`)
-    || observations.includes(`ordem ${externalOrderId}`);
+  return ["Pedido Zouti", "Transação Hotmart"].some((label) =>
+    observations.includes(`${label}: ${externalOrderId}`)
+  ) || observations.includes(`ordem ${externalOrderId}`);
 }
 
 export function reconcileCustomerMatchIds(matchGroups: string[][]): string | null {
@@ -405,17 +437,31 @@ export function contaAzulPaymentMethod(order: CommerceOrder): string {
     DEBIT_CARD: "CARTAO_DEBITO",
     BOLETO: "BOLETO_BANCARIO",
     BANK_SLIP: "BOLETO_BANCARIO",
+    BILLET: "BOLETO_BANCARIO",
+    FINANCED_BILLET: "BOLETO_BANCARIO",
     BANK_TRANSFER: "TRANSFERENCIA_BANCARIA",
+    DIRECT_BANK_TRANSFER: "TRANSFERENCIA_BANCARIA",
+    DIRECT_DEBIT: "TRANSFERENCIA_BANCARIA",
     TRANSFER: "TRANSFERENCIA_BANCARIA",
     CASH: "DINHEIRO",
     WALLET: "CARTEIRA_DIGITAL",
+    APPLE_PAY: "CARTEIRA_DIGITAL",
+    GOOGLE_PAY: "CARTEIRA_DIGITAL",
+    SAMSUNG_PAY: "CARTEIRA_DIGITAL",
+    PICPAY: "CARTEIRA_DIGITAL",
   };
   return mappings[method] ?? "OUTRO";
 }
 
-export function contaAzulSku(sourceProductId: string): string {
+export function contaAzulSku(sourceProductId: string, platform = "zouti"): string {
   const normalized = sourceProductId.toUpperCase().replace(/[^A-Z0-9]/g, "");
-  return `ZO${normalized.slice(-18).padStart(18, "0")}`;
+  const normalizedPlatform = platform.trim().toLowerCase();
+  const prefix = normalizedPlatform === "zouti"
+    ? "ZO"
+    : normalizedPlatform === "hotmart"
+    ? "HM"
+    : normalizedPlatform.toUpperCase().replace(/[^A-Z0-9]/g, "").padEnd(2, "X").slice(0, 2);
+  return `${prefix}${normalized.slice(-18).padStart(18, "0")}`;
 }
 
 export function buildContaAzulPerson(order: CommerceOrder): JsonObject {
@@ -425,14 +471,19 @@ export function buildContaAzulPerson(order: CommerceOrder): JsonObject {
     : customer.document?.length === 11
     ? "Física"
     : "Estrangeira";
+  const mobilePhone = contaAzulMobilePhone(customer.phone);
+  const observation = [
+    `Sincronizado pelo HumanOS; origem ${order.sourcePlatform}; cliente ${customer.sourceId}`,
+    customer.phone && !mobilePhone ? `telefone informado: ${customer.phone}` : null,
+  ].filter(Boolean).join("; ");
   const result: JsonObject = {
     ativo: true,
     nome: customer.name.slice(0, 200),
     email: customer.email?.slice(0, 100),
-    telefone_celular: customer.phone,
+    telefone_celular: mobilePhone,
     tipo_pessoa: type,
     perfis: [{ tipo_perfil: "Cliente" }],
-    observacao: `Sincronizado pelo HumanOS; origem ${order.sourcePlatform}; cliente ${customer.sourceId}`.slice(0, 2000),
+    observacao: observation.slice(0, 2000),
   };
   if (type === "Física") result.cpf = customer.document;
   if (type === "Jurídica") result.cnpj = customer.document;
@@ -451,14 +502,14 @@ export function buildContaAzulPerson(order: CommerceOrder): JsonObject {
   return Object.fromEntries(Object.entries(result).filter(([, value]) => value !== null && value !== undefined));
 }
 
-export function buildContaAzulProduct(item: CommerceItem): JsonObject {
+export function buildContaAzulProduct(item: CommerceItem, platform = "zouti"): JsonObject {
   return {
     ativo: true,
     status: "ATIVO",
     formato: "SIMPLES",
     nome: item.name.slice(0, 100),
-    codigo_sku: contaAzulSku(item.sourceId),
-    descricao: `${item.description ?? item.name} | Origem Zouti: ${item.sourceId}`.slice(0, 400),
+    codigo_sku: contaAzulSku(item.sourceId, platform),
+    descricao: `${item.description ?? item.name} | Origem ${platformLabel(platform)}: ${item.sourceId}`.slice(0, 400),
     estoque: { valor_venda: item.unitAmount },
   };
 }
@@ -481,7 +532,7 @@ function statusLabel(status: NormalizedOrderStatus): string {
 
 function paymentDescription(order: CommerceOrder): string {
   const lines = [
-    "PAGAMENTO ZOUTI",
+    `PAGAMENTO ${platformLabel(order.sourcePlatform).toUpperCase()}`,
     `Situação: ${statusLabel(order.normalizedStatus)} (${order.sourceStatus})`,
     `Método: ${order.paymentMethod ?? "Não informado"}`,
     `Tipo: ${order.paymentType ?? "Não informado"}`,
@@ -509,13 +560,14 @@ function saleDescription(
   order: CommerceOrder,
   trace?: { webhookId: string; ingestSequence: number; receivedAt: string; eventType: string | null },
 ): string {
+  const label = platformLabel(order.sourcePlatform);
   const lines = [
-    "INTEGRAÇÃO HUMANOS • ZOUTI",
+    `INTEGRAÇÃO HUMANOS • ${label.toUpperCase()}`,
     `Situação atual: ${statusLabel(order.normalizedStatus)} (${order.sourceStatus})`,
-    `Pedido Zouti: ${order.externalOrderId}`,
+    `${orderReferenceLabel(order.sourcePlatform)}: ${order.externalOrderId}`,
     order.orderSessionId ? `Sessão do pedido: ${order.orderSessionId}` : null,
-    `Criado na Zouti: ${order.sourceCreatedAt}`,
-    `Atualizado na Zouti: ${order.sourceUpdatedAt}`,
+    `Criado na ${label}: ${order.sourceCreatedAt}`,
+    `Atualizado na ${label}: ${order.sourceUpdatedAt}`,
     trace ? `Recebido pelo HumanOS: ${trace.receivedAt}` : null,
     trace?.eventType ? `Evento de entrada: ${trace.eventType}` : null,
     trace ? `Webhook: ${trace.webhookId}` : null,
@@ -524,7 +576,7 @@ function saleDescription(
     "ITENS",
     ...order.items.flatMap((item, index) => [
       `${index + 1}. ${item.name}`,
-      `   Produto Zouti: ${item.sourceId}${item.type ? ` | Tipo: ${item.type}` : ""}`,
+      `   Produto ${label}: ${item.sourceId}${item.type ? ` | Tipo: ${item.type}` : ""}`,
       `   Quantidade: ${item.quantity} | Unitário: ${brl(item.unitAmount)} | Total: ${brl(item.unitAmount * item.quantity)}`,
       item.description ? `   Descrição: ${item.description}` : null,
     ]),
@@ -570,7 +622,7 @@ export function buildContaAzulSale(
       descricao: [
         item.name,
         item.description,
-        `Produto Zouti: ${item.sourceId}`,
+        `Produto ${platformLabel(order.sourcePlatform)}: ${item.sourceId}`,
         item.type ? `Tipo: ${item.type}` : null,
       ].filter(Boolean).join(" | ").slice(0, 400),
       quantidade: item.quantity,

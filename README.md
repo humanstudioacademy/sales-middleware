@@ -222,8 +222,10 @@ O e-mail é a chave do aluno no portal. Uma ordem sem e-mail para com
 `mapping_incomplete` em vez de matricular alguém sem identidade.
 
 O Vercel chama `/api/cron` a cada minuto. Cada execução tenta até 20 eventos
-Zouti por destino. A seleção é FIFO dentro da plataforma; eventos Hotmart
-permanecem pendentes até o adaptador Hotmart ser explicitamente implementado.
+por destino. A seleção é FIFO dentro de cada plataforma. O worker da Conta Azul
+só reclama eventos das plataformas com linha habilitada em
+`conta_azul_platform_mappings`; os eventos das demais (Hotmart, enquanto
+`enabled = false`) ficam intactos na fila, em ordem, sem tocar a Conta Azul.
 
 ## Estrutura
 
@@ -368,6 +370,109 @@ sequência processada. Toda decisão fica em auditoria append-only.
 Referências oficiais: [autenticação OAuth](https://developers.contaazul.com/auth),
 [renovação do token](https://developers.contaazul.com/renewingaccesstoken) e
 [API de vendas](https://developers.contaazul.com/openapi/venda/paths/~1v1~1venda~1busca/get).
+
+## Uma transação, uma venda
+
+`conta_azul_orders` é a tabela de vínculo entre a transação na origem e a venda
+na Conta Azul, e vale igual para toda plataforma:
+
+| Origem | Identidade (`source_platform`, `external_order_id`) | Venda na Conta Azul |
+|---|---|---|
+| Zouti | `zouti`, `ord_…` | `conta_azul_sale_id` + `conta_azul_sale_number` |
+| Hotmart | `hotmart`, `HP…` (código da transação) | idem |
+
+Regras que o banco impõe, independentemente do código:
+
+- a identidade é única (`conta_azul_orders_identity`), então dois eventos da
+  mesma transação sempre caem na mesma linha;
+- `conta_azul_sale_id` e `conta_azul_sale_number` são únicos: nenhuma venda da
+  Conta Azul pode pertencer a duas transações;
+- depois de vinculada, a venda não pode ser trocada (trigger
+  `conta_azul_orders_guard_identity`): um evento posterior só atualiza a venda
+  existente, nunca aponta para outra;
+- o número da venda é reservado por `reserve_conta_azul_sale_number`, que
+  escolhe o maior entre o "próximo número" da Conta Azul e o sucessor do maior
+  número já reservado localmente. Uma reserva que nunca virou venda não faz a
+  Conta Azul devolver o mesmo número para as ordens seguintes;
+- cada webhook processado fica em `conta_azul_order_events` (chave primária
+  `webhook_id`): uma reentrega do mesmo webhook encerra sem chamar a Conta Azul.
+
+O que cada transição faz na venda já vinculada:
+
+| Estado normalizado da transação | Sem venda vinculada | Com venda vinculada |
+|---|---|---|
+| `paid` (aprovada, completa) | cria a venda e a baixa | atualiza a mesma venda (`PUT`), baixa já existente é mantida |
+| `pending` (boleto, PIX aguardando, atraso) | registra localmente | registra localmente |
+| `rejected` (expirada, sem fundos) | registra localmente | registra localmente |
+| `cancelled`, `refunded`, `chargeback` | registra localmente | estorna a baixa e cancela a mesma venda |
+
+"Aprovada" seguida de "completa" (fim da garantia) é o caso típico: são dois
+webhooks da mesma transação, com o mesmo `HP…`, e produzem uma venda só.
+
+## Contrato Hotmart → Conta Azul
+
+O adaptador (`_shared/hotmart-order.ts`) lê o webhook v2.0.0 e converte para o
+mesmo `CommerceOrder` da Zouti. A identidade é `data.purchase.transaction`.
+
+- `PURCHASE_APPROVED` e `PURCHASE_COMPLETE` → `paid`;
+- `PURCHASE_BILLET_PRINTED`, `PURCHASE_DELAYED` → `pending`;
+- `PURCHASE_EXPIRED` → `rejected`;
+- `PURCHASE_CANCELED` → `cancelled`; `PURCHASE_REFUNDED` → `refunded`;
+  `PURCHASE_CHARGEBACK` → `chargeback`;
+- `PURCHASE_PROTEST` (disputa aberta) **não** mexe na venda: fica em
+  `conta_azul_deferred_events` com vínculo à transação até chegar o
+  reembolso ou o chargeback;
+- carrinho abandonado, eventos de assinatura (`SUBSCRIPTION_*`, `SWITCH_PLAN`,
+  `UPDATE_SUBSCRIPTION_CHARGE_DATE`), área de membros (`CLUB_*`) e eventos
+  desconhecidos são diferidos, nunca viram venda;
+- payloads do sandbox e do botão "testar postback" da Hotmart (produto `0`,
+  oferta `test`, SKU `HTM_SANDBOX-*`, produtor "Producer Test Name") são
+  diferidos como `hotmart_sandbox_event`.
+
+Valores: o bruto é `data.purchase.price` quando a compra é em BRL; o líquido é
+a comissão `PRODUCER`; a taxa é a diferença. Em moeda estrangeira a Hotmart
+informa as comissões em USD e a conversão para BRL só na parte do produtor, então
+o bruto em BRL é a soma das comissões pela mesma taxa de conversão. Sem
+conversão, o mapeamento para com erro em vez de chutar.
+
+Cliente: o documento (CPF/CNPJ) é a identidade, com e-mail como reserva; um
+documento estrangeiro não vira CPF. Telefones que a Conta Azul rejeita
+(estrangeiros, fixos) são omitidos do cadastro e preservados na observação do
+cliente, em vez de derrubar a venda.
+
+### Virada da integração nativa para o middleware
+
+A Conta Azul tem uma integração nativa com a Hotmart. Ela lança um "Lançamento
+Financeiro" por evento recebido (aprovada, completa…), o que produz os
+registros duplicados por transação. Enquanto ela estiver ligada, o middleware
+**não pode** lançar Hotmart: seriam duas fontes para a mesma compra. A virada
+tem ordem obrigatória:
+
+1. desligar a integração nativa Hotmart na Conta Azul e anotar o instante;
+2. registrar a data de corte no mapeamento, para que compras anteriores (já
+   lançadas pela integração nativa) sejam apenas acompanhadas localmente:
+
+   ```sql
+   update public.conta_azul_platform_mappings
+   set sync_orders_created_from = timestamptz '2026-09-04 00:00:00-03',
+       updated_at = clock_timestamp()
+   where source_platform = 'hotmart';
+   ```
+
+3. habilitar o mapeamento; o worker passa a reclamar a fila Hotmart no minuto
+   seguinte, do evento mais antigo ao mais novo:
+
+   ```sql
+   update public.conta_azul_platform_mappings
+   set enabled = true, updated_at = clock_timestamp()
+   where source_platform = 'hotmart';
+   ```
+
+Reembolsos e chargebacks de compras anteriores à data de corte não têm venda
+vinculada e ficam registrados em `conta_azul_orders` com `last_action =
+cancel_without_sale`; o estorno desses lançamentos nativos é manual. O
+mapeamento Hotmart já aponta para `Hotmart - Conta Corrente` e a categoria
+`1.06 Cursos Online B2C`, e nasce com `enabled = false`.
 
 ## Contrato AgentLab → portal do aluno
 
