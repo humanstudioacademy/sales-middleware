@@ -15,6 +15,7 @@ import {
   parseZoutiOrder,
   reconcileCustomerMatchIds,
   saleObservationsBelongToOrder,
+  settlementComposition,
 } from "../supabase/functions/_shared/zouti-order.ts";
 
 test("recognizes an already cancelled Conta Azul sale idempotently", () => {
@@ -370,6 +371,53 @@ test("keeps free bonus items out of the Conta Azul sale and refuses an all-free 
       }),
     /positive value/,
   );
+});
+
+test("charges the platform's full deduction as the settlement fee", () => {
+  // Venda parcelada real: cliente pagou 2782,45, a Zouti reteve 102,14 de
+  // tarifa e 342,08 dos juros, e repassou 2338,23.
+  const parcelada = parseZoutiOrder({
+    ...paidPayload,
+    amount_total: 278245,
+    amount_total_in_brl: 2782.45,
+    payment: {
+      method: "CREDIT_CARD",
+      installments: 12,
+      amount: 278245,
+      amount_in_brl: 2782.45,
+      fee: 10214,
+      fee_in_brl: 102.14,
+      net_amount: 233823,
+      net_amount_in_brl: 2338.23,
+      interest_amount: 40245,
+      interest_amount_in_brl: 402.45,
+      interest_transfer_amount: 6037,
+      interest_transfer_amount_in_brl: 60.37,
+    },
+    split_payments: null,
+  }, "zouti");
+  const unica = settlementComposition(parcelada, 2782.45, 1);
+  assert.equal(unica.taxa, 444.22);
+  assert.equal(unica.liquido, 2338.23);
+  assert.equal(Math.round((2782.45 - unica.taxa) * 100) / 100, 2338.23);
+
+  // Rateio proporcional quando a Conta Azul cria mais de uma parcela.
+  const metade = settlementComposition(parcelada, 1391.23, 2);
+  assert.equal(metade.taxa, 222.11);
+  assert.equal(metade.liquido, 1169.12);
+
+  // Sem líquido informado, cai para a tarifa conhecida.
+  const semLiquido = parseZoutiOrder({
+    ...paidPayload,
+    payment: { method: "PIX", installments: 1, amount: 9790, amount_in_brl: 97.9, fee: 290, fee_in_brl: 2.9 },
+    split_payments: null,
+  }, "zouti");
+  assert.equal(semLiquido.netAmount, null);
+  assert.deepEqual(settlementComposition(semLiquido, 97.9, 1), { taxa: 2.9, liquido: 95 });
+
+  // A taxa nunca ultrapassa o valor da parcela.
+  const gratuito = settlementComposition(parcelada, 0, 1);
+  assert.equal(gratuito.taxa, 0);
 });
 
 test("resumes the same queue delivery after persisting its order row", () => {

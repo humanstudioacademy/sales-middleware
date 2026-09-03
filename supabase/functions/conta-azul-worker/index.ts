@@ -15,6 +15,7 @@ import {
   isCancelledSaleSituation,
   reconcileCustomerMatchIds,
   saleObservationsBelongToOrder,
+  settlementComposition,
 } from "../_shared/zouti-order.ts";
 
 type JsonObject = Record<string, unknown>;
@@ -682,6 +683,7 @@ async function ensureSaleSettled(
     const gross = numberValue(installment.valor)
       ?? numberValue(object(installment.detalhe_valor)?.valor_bruto)
       ?? order.totalAmount / installments.length;
+    const settlement = settlementComposition(order, gross, installments.length);
     const response = await contaAzulJson(
       `/v1/financeiro/eventos-financeiros/parcelas/${encodeURIComponent(installmentId)}/baixa`,
       {
@@ -694,8 +696,8 @@ async function ensureSaleSettled(
             juros: 0,
             valor_bruto: gross,
             desconto: 0,
-            taxa: order.feeAmount ?? 0,
-            valor_liquido: order.netAmount ?? gross,
+            taxa: settlement.taxa,
+            valor_liquido: settlement.liquido,
           },
           conta_financeira: financialAccountId,
           metodo_pagamento: contaAzulPaymentMethod(order),
@@ -1071,7 +1073,10 @@ async function syncOrderBySequence(ingestSequence: number): Promise<JsonObject> 
   };
 }
 
-async function refreshExistingSaleBySequence(ingestSequence: number): Promise<JsonObject> {
+async function refreshExistingSaleBySequence(
+  ingestSequence: number,
+  resettle = false,
+): Promise<JsonObject> {
   const rows = await databaseJson(
     `/rest/v1/webhook_inbox?select=id,ingest_sequence,received_at,source_platform,source_event_type,body_json&ingest_sequence=eq.${ingestSequence}&limit=1`,
     { method: "GET" },
@@ -1098,7 +1103,10 @@ async function refreshExistingSaleBySequence(ingestSequence: number): Promise<Js
   for (const item of order.items) productIds.push(await ensureService(order, item));
   let details = await getSaleDetails(orderRow.conta_azul_sale_id);
   const action = desiredOrderAction(order.normalizedStatus, true);
-  if (action === "cancel_sale") await reverseSaleSettlements(details);
+  // `resettle` apaga a baixa existente para que ela seja recriada com a
+  // composição atual. Usado para corrigir baixas gravadas com a taxa
+  // incompleta, antes de a retenção de juros entrar no cálculo.
+  if (action === "cancel_sale" || resettle) await reverseSaleSettlements(details);
   const payload = buildContaAzulSale(order, {
     customerId,
     productIds,
@@ -1152,6 +1160,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
       batch_size?: unknown;
       operation?: unknown;
       ingest_sequence?: unknown;
+      resettle?: unknown;
     };
     if (input.operation === "refresh_sale" || input.operation === "sync_order") {
       const ingestSequence = Number(input.ingest_sequence);
@@ -1170,7 +1179,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
       try {
         return json(
           input.operation === "refresh_sale"
-            ? await refreshExistingSaleBySequence(ingestSequence)
+            ? await refreshExistingSaleBySequence(ingestSequence, input.resettle === true)
             : await syncOrderBySequence(ingestSequence),
         );
       } finally {

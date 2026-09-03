@@ -470,6 +470,35 @@ export function reconcileCustomerMatchIds(matchGroups: string[][]): string | nul
   return uniqueIds[0] ?? null;
 }
 
+/**
+ * Composição da baixa. A `taxa` precisa carregar **tudo** que a plataforma
+ * retém, não só a tarifa do gateway: na venda parcelada a Zouti fica com a
+ * maior parte dos juros (`interest_amount` menos `interest_transfer_amount`) e
+ * `payment.fee` cobre apenas o processamento. A Conta Azul calcula o valor
+ * recebido como `valor_bruto - taxa`, então informar só a tarifa faz o caixa
+ * ficar maior do que o dinheiro que entrou.
+ *
+ * A referência é o líquido informado pela origem. Quando ela não informa,
+ * a taxa cai para a tarifa conhecida.
+ */
+export function settlementComposition(
+  order: CommerceOrder,
+  installmentGross: number,
+  installmentCount: number,
+): { taxa: number; liquido: number } {
+  const round = (value: number) => Math.round(value * 100) / 100;
+  const charged = order.paymentAmount ?? order.totalAmount;
+  if (order.netAmount === null || charged <= 0) {
+    const taxa = round(Math.min(order.feeAmount ?? 0, installmentGross));
+    return { taxa, liquido: round(installmentGross - taxa) };
+  }
+  // Rateia proporcionalmente quando a venda tem mais de uma parcela.
+  const share = installmentCount > 1 ? installmentGross / charged : 1;
+  const deductions = Math.max(0, charged - order.netAmount);
+  const taxa = round(Math.min(deductions * share, installmentGross));
+  return { taxa, liquido: round(installmentGross - taxa) };
+}
+
 export function contaAzulPaymentMethod(order: CommerceOrder): string {
   if (order.splitPayments.length > 1) return "OUTRO";
   const method = order.paymentMethod ?? order.splitPayments[0]?.method ?? "OUTRO";
