@@ -71,6 +71,19 @@ ao de compra concluída.
 Nenhuma das parcelas criadas pelo SquadHub tem baixa ou conciliação, então
 excluí-las não desfaz trabalho do financeiro.
 
+O que esses lançamentos fazem com o resultado de agosto e setembro:
+
+| Problema | Ocorrências | Valor |
+|---|---|---|
+| Transação lançada em dobro | 57 | R$ 1.025.244,57 |
+| Reembolso ou chargeback nunca revertido | 20 | R$ 50.706,72 |
+| Total lançado pelo SquadHub no período | 152 | R$ 2.125.198,09 |
+
+O segundo item é o mais silencioso: o SquadHub lançava a receita na compra e
+nunca reagia ao reembolso, então 20 compras devolvidas continuam na Conta Azul
+como valor a receber. O middleware trata isso sozinho — cancela a venda e
+estorna a baixa quando o reembolso chega.
+
 - `01-excluir-na-conta-azul.csv` — os 152 lançamentos a excluir, por cliente,
   com competência, valor, quantidade de parcelas e o código da transação.
 - `02-hotmart-a-relancar.csv` — as 96 transações que o middleware relança em

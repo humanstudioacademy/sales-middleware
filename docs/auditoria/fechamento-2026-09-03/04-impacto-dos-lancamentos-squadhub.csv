@@ -1,0 +1,4 @@
+problema,ocorrencias,valor_r$,observacao
+Transação lançada em dobro,57,1025244.57,o SquadHub reagia à compra aprovada e de novo à compra concluída
+Reembolso/chargeback nunca revertido,20,50706.72,segue como receita a receber na Conta Azul
+Total lançado pelo SquadHub em ago/set,152,2125198.09,será substituído pelo lançamento do middleware
