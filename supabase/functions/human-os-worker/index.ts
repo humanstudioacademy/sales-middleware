@@ -39,6 +39,13 @@ async function databaseJson(path: string, init: RequestInit): Promise<unknown> {
   return raw ? JSON.parse(raw) : null;
 }
 
+/**
+ * Plataformas cujo FIFO este worker consome. A entrega é o replay byte a byte
+ * do webhook original, então o humanOS recebe o contrato de cada plataforma
+ * como ele veio da origem.
+ */
+const SUPPORTED_PLATFORMS = ["zouti", "hotmart"];
+
 async function rpc(name: string, body: JsonObject): Promise<unknown> {
   return await databaseJson(`/rest/v1/rpc/${name}`, {
     method: "POST",
@@ -48,7 +55,7 @@ async function rpc(name: string, body: JsonObject): Promise<unknown> {
 }
 
 async function deliver(job: ClaimedJob): Promise<number> {
-  if (job.source_platform.trim().toLowerCase() !== "zouti") {
+  if (!SUPPORTED_PLATFORMS.includes(job.source_platform.trim().toLowerCase())) {
     throw new Error("HumanOS worker claimed an unsupported platform");
   }
   if (job.encryption_algorithm !== "AES-256-GCM") {
@@ -63,11 +70,14 @@ async function deliver(job: ClaimedJob): Promise<number> {
     webhookId: job.webhook_id,
     ingestSequence: job.ingest_sequence,
     bodySha256: job.body_sha256,
+    sourcePlatform: job.source_platform,
   });
   const response = await fetch(replay.url, {
     method: "POST",
     headers: replay.headers,
-    body: replay.body,
+    // O corpo é o envelope original em bytes; o tipo de `fetch` no Deno atual
+    // não aceita `Uint8Array` genérico, mas o runtime envia sem alteração.
+    body: replay.body as unknown as BodyInit,
     redirect: "manual",
     signal: AbortSignal.timeout(20_000),
   });
@@ -122,23 +132,36 @@ Deno.serve(async (request: Request): Promise<Response> => {
 
     try {
       const result = { claimed: 0, delivered: 0, failed: 0 };
-      for (let index = 0; index < batchSize; index += 1) {
-        const jobs = await rpc("claim_integration_jobs", {
-          p_destination: "human_os",
-          p_batch_size: 1,
-          p_source_platform: "zouti",
-        }) as ClaimedJob[];
-        const job = jobs[0];
-        if (!job) break;
-        result.claimed += 1;
-        try {
-          await complete(job, await deliver(job));
-          result.delivered += 1;
-        } catch (error) {
-          await fail(job, error);
-          result.failed += 1;
-          break;
+      // Uma plataforma que falha bloqueia só o próprio FIFO; as demais seguem.
+      const platforms = new Set<string>(SUPPORTED_PLATFORMS);
+      const startedAt = Date.now();
+
+      while (result.claimed < batchSize && platforms.size > 0 && Date.now() - startedAt < 100_000) {
+        let progressed = false;
+        for (const platform of [...platforms]) {
+          if (result.claimed >= batchSize || Date.now() - startedAt >= 100_000) break;
+          const jobs = await rpc("claim_integration_jobs", {
+            p_destination: "human_os",
+            p_batch_size: 1,
+            p_source_platform: platform,
+          }) as ClaimedJob[];
+          const job = jobs[0];
+          if (!job) {
+            platforms.delete(platform);
+            continue;
+          }
+          progressed = true;
+          result.claimed += 1;
+          try {
+            await complete(job, await deliver(job));
+            result.delivered += 1;
+          } catch (error) {
+            await fail(job, error);
+            result.failed += 1;
+            platforms.delete(platform);
+          }
         }
+        if (!progressed) break;
       }
       return json(result);
     } finally {

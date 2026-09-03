@@ -11,8 +11,12 @@ export interface HumanOsReplay {
 export function buildHumanOsReplay(
   envelope: RequestEnvelope,
   destinationUrl: string,
-  trace: { webhookId: string; ingestSequence: number; bodySha256: string },
+  trace: { webhookId: string; ingestSequence: number; bodySha256: string; sourcePlatform?: string },
 ): HumanOsReplay {
+  // O corpo é o webhook original da plataforma, então o humanOS precisa saber
+  // de qual contrato ele veio. Zouti continua sendo o padrão para não mudar o
+  // que já está em produção.
+  const platform = trace.sourcePlatform?.trim().toLowerCase() || "zouti";
   const target = new URL(destinationUrl);
   if (envelope.raw_query_string) {
     const original = new URLSearchParams(envelope.raw_query_string);
@@ -24,8 +28,8 @@ export function buildHumanOsReplay(
     if (!BLOCKED_HEADER.test(name)) headers.append(name, value);
   }
   if (!headers.has("content-type")) headers.set("content-type", "application/json");
-  headers.set("idempotency-key", `zouti-${trace.webhookId}`);
-  headers.set("x-humanos-source", "zouti");
+  headers.set("idempotency-key", `${platform}-${trace.webhookId}`);
+  headers.set("x-humanos-source", platform);
   headers.set("x-humanos-webhook-id", trace.webhookId);
   headers.set("x-humanos-ingest-sequence", String(trace.ingestSequence));
   headers.set("x-zouti-original-body-sha256", trace.bodySha256);

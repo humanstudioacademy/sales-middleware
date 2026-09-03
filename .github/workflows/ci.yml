@@ -19,4 +19,4 @@ jobs:
         with:
           node-version: 22
       - run: npm test
-      - run: npx --yes deno@2.5.0 check supabase/functions/conta-azul-auth/index.ts supabase/functions/conta-azul-api/index.ts supabase/functions/conta-azul-worker/index.ts supabase/functions/queue-status/index.ts supabase/functions/student-portal-worker/index.ts supabase/functions/zolt-webhook/index.ts
+      - run: npx --yes deno@2.5.0 check supabase/functions/conta-azul-auth/index.ts supabase/functions/conta-azul-api/index.ts supabase/functions/conta-azul-worker/index.ts supabase/functions/human-os-worker/index.ts supabase/functions/queue-status/index.ts supabase/functions/student-portal-worker/index.ts supabase/functions/zolt-webhook/index.ts
