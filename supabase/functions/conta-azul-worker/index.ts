@@ -1033,11 +1033,16 @@ Deno.serve(async (request: Request): Promise<Response> => {
       const enabled = await enabledPlatforms();
       const platforms = new Set(enabled);
       let claimed = 0;
+      // Nenhum item novo é reclamado depois deste orçamento: a execução precisa
+      // terminar dentro do lease global (180 s), senão dois workers poderiam
+      // processar a mesma ordem ao mesmo tempo.
+      const startedAt = Date.now();
+      const withinBudget = () => Date.now() - startedAt < 100_000;
 
-      while (claimed < batchSize && platforms.size > 0) {
+      while (claimed < batchSize && platforms.size > 0 && withinBudget()) {
         let progressed = false;
         for (const platform of [...platforms]) {
-          if (claimed >= batchSize) break;
+          if (claimed >= batchSize || !withinBudget()) break;
           const jobs = await rpc("claim_integration_jobs", {
             p_destination: "conta_azul",
             p_batch_size: 1,
