@@ -1,0 +1,97 @@
+transacao,comprador,produto,valor,status_final,eventos,resultado_esperado
+HP2548642940,Victor Jungles da Silva,AcademyPass,2846.96,COMPLETED,2,venda aprovada
+HP4095733591,Vinicius Ribeiro Veloso,AcademyPass,2846.96,COMPLETED,2,venda aprovada
+HP0902210451,Jimena Villaverde,AcademyPass,686532,COMPLETED,2,venda aprovada
+HP1735238316,Janaina Dos Santos Gomes,AcademyPass,2380,COMPLETED,2,venda aprovada
+HP0117539401,Rosa Souza Lima,AcademyPass,2847,COMPLETED,2,venda aprovada
+HP2666408919,Erika Rodrigues da Silva Batista,ChatGPT Pro,549,COMPLETED,2,venda aprovada
+HP2928099468,Salem Manaoara Aparecida Andres Pinto,AcademyPass,2846.96,COMPLETED,2,venda aprovada
+HP2123032914,Danilo Paulino Leimig,AcademyPass,2846.96,COMPLETED,2,venda aprovada
+HP3046076174,Yanne Luna Rodrigues Monteiro,AcademyPass,2847,COMPLETED,2,venda aprovada
+HP1886426020,Felipe Vilardi,AcademyPass,2847,REFUNDED,3,venda cancelada
+HP4086035482,Mauro Borba,AcademyPass,2846.96,COMPLETED,2,venda aprovada
+HP3013971805,Pedro Henrique Cunha,AcademyPass,2847,COMPLETED,2,venda aprovada
+HP1821650288,Beatriz Bessa SARAGOÇA,AcademyPass,2380,COMPLETED,3,venda aprovada
+HP2271806501,Gabriel Eloy,AcademyPass,2847,REFUNDED,3,venda cancelada
+HP3987972130,Raphael correia,AcademyPass,2847,REFUNDED,3,venda cancelada
+HP0842169888,Bruno Brazão Gerencer,AI Video Creator PRO + AI Image Creator PRO,2279,COMPLETED,2,venda aprovada
+HP0435490301,JULIO EDUARDO MAGALHAES MARCELLO,AcademyPass,2846.96,COMPLETED,2,venda aprovada
+HP0031519280,Thereza Gontijo Alves de Souza Nogueira Viana,AcademyPass,2380,COMPLETED,3,venda aprovada
+HP2970093462,Marcos Antonio,AcademyPass,2846.96,REFUNDED,2,venda cancelada
+HP2335319073,KELVIN DE OLIVEIRA SOARES,Academy Pass,2379.94,COMPLETED,2,venda aprovada
+HP0183665306,Caroline de Oliveira dos Santos,AcademyPass,2847,COMPLETED,3,venda aprovada
+HP0704070225,FERNANDA Dolabella DUBAL,AI Video Creator PRO + AI Image Creator PRO,2679,REFUNDED,3,venda cancelada
+HP2910806025,João Victor Ravaneda,AcademyPass,2846.96,REFUNDED,3,venda cancelada
+HP4196682822,Pedro de Mello de Vicq,AcademyPass,2847,REFUNDED,3,venda cancelada
+HP1376653462,Luiza assis Falcão,AcademyPass,2846.96,COMPLETED,1,venda aprovada
+HP4026955483,StudioBah Design,AI Image Creator PRO,1358.3,COMPLETED,1,venda aprovada
+HP2432991099,Marco Thulio Maciel,AcademyPass,2846.96,REFUNDED,2,venda cancelada
+HP3313928162,Overall Digital,AcademyPass,2846.96,REFUNDED,3,venda cancelada
+HP2951879447,Thiago Cordeiro,AcademyPass,2847,COMPLETED,3,venda aprovada
+HP3644071722,Heloisa Correa Garrido,AI Video Creator PRO + AI Image Creator PRO,2679,REFUNDED,3,venda cancelada
+HP0608249659,Aline Breciani,AcademyPass,2847.01,COMPLETED,2,venda aprovada
+HP0668268843,GUILBER CLAYTON HIDAKA,AI Video Creator PRO,1879,COMPLETED,2,venda aprovada
+HP1459697330,MAURO ZENATI FILHO,AI Video Creator PRO + AI Image Creator PRO,2411,COMPLETED,2,venda aprovada
+HP1974106610,LIQUIDZ COMERCIO DE PRODUTOS NATURAIS LTDA,AI Video Creator PRO + AI Image Creator PRO,2679,COMPLETED,2,venda aprovada
+HP2484065824,Pedro Duarte Vargens,AcademyPass,2847,COMPLETED,3,venda aprovada
+HP2637919411,Marc Olivier Recco Alram,AcademyPass,420,CHARGEBACK,2,venda cancelada
+HP1195019091,tiago marmor,AI Video Creator PRO + AI Image Creator PRO,1937,REFUNDED,2,venda cancelada
+HP0237574480,ALDENIR DE MORAES CARVALHO,AcademyPass,2847,COMPLETED,2,venda aprovada
+HP2099834133,Gabriel Ferreira Vidinha Gomes,AI Video Creator PRO + AI Image Creator PRO,1823,REFUNDED,2,venda cancelada
+HP3121928070,Maria Eduarda Zanuncini,AcademyPass,2847,COMPLETED,2,venda aprovada
+HP0646869044,Daniel Junqueira,AcademyPass,2380,COMPLETED,3,venda aprovada
+HP0181738273,Luana Fontana de Castro Cordeiro,AcademyPass,2846.96,REFUNDED,2,venda cancelada
+HP2365709303,Caroline Maritan Costa,AcademyPass,2846.96,REFUNDED,2,venda cancelada
+HP1443188709,Joao Gabriel De Melo Sousa,AcademyPass,2847,REFUNDED,2,venda cancelada
+HP1972927172,Esdras Lopes,AcademyPass,2847,COMPLETED,2,venda aprovada
+HP1518045058,Thales Cavalcante,AcademyPass,2846.96,COMPLETED,2,venda aprovada
+HP3557876457,Ariane Nataly Toledo Mendes,AcademyPass,2846.96,COMPLETED,2,venda aprovada
+HP4128042034,Thiago Dayan da Luz Barros,AcademyPass,2846.96,REFUNDED,2,venda cancelada
+HP2325508762,Alex Angelo Terek de Souza Gemmi,AcademyPass,2846.96,COMPLETED,2,venda aprovada
+HP1308814988,Tif Comunicação,AcademyPass,2846.96,COMPLETED,2,venda aprovada
+HP3877444618,Eloá Brascô,AcademyPass,2846.96,COMPLETED,2,venda aprovada
+HP2103614271,renan molin,AcademyPass,2847,REFUNDED,3,venda cancelada
+HP2177748215,CARLOS PINHEIRO,AcademyPass,2846.96,COMPLETED,2,venda aprovada
+HP0427156044,Stela Zanetti,AcademyPass,2847,REFUNDED,2,venda cancelada
+HP1874976022,Vanessa Nazario Pires,AcademyPass,2847.04,COMPLETED,2,venda aprovada
+HP1655730446,Thor de Paula,AcademyPass,2846.96,COMPLETED,2,venda aprovada
+HP1582887021,Marcel Rodrigues,AcademyPass,2846.96,COMPLETED,2,venda aprovada
+HP3522389258,Felipe Vilardi,AcademyPass,2847,REFUNDED,3,venda cancelada
+HP2607902419,Maria P TOBON,ChatGPT Pro,222620,COMPLETED,2,venda aprovada
+HP2591358216,Sergio pasqualino junior,ChatGPT Pro,287,COMPLETED,2,venda aprovada
+HP2367434357,william de oliveira matos,AI Video Creator PRO,1180,COMPLETED,2,venda aprovada
+HP2365125863,Giulianna Fontana Pimentel,ChatGPT Pro,287,COMPLETED,2,venda aprovada
+HP2325881475,Maria Fernanda Bolognese,ChatGPT Pro,287,COMPLETED,2,venda aprovada
+HP3479743427,Monica Tomin Pimentel,ChatGPT Pro,287,COMPLETED,2,venda aprovada
+HP3462044977,Mariana Bukvic,ChatGPT Pro,287,COMPLETED,2,venda aprovada
+HP3125004941,Carolina Crumo,ChatGPT Pro,287,COMPLETED,2,venda aprovada
+HP2732176314,Alexandra Barbosa Martins,AI Video Creator PRO,780,COMPLETED,2,venda aprovada
+HP2862606191,Rafael Yoshida,ChatGPT Pro,287,COMPLETED,2,venda aprovada
+HP3912970688,Saulo Carvalho,ChatGPT Pro,287,REFUNDED,2,venda cancelada
+HP3745604917,Alex R S Pimentel,ChatGPT Pro,287,COMPLETED,2,venda aprovada
+HP3744835419,Fabiola Carvalho Mesquita,ChatGPT Pro,287,COMPLETED,2,venda aprovada
+HP2927044792,Gian Carlo bellotti,AcademyPass,2846.96,COMPLETED,2,venda aprovada
+HP4197086111,Tiago Ferracini,ChatGPT Pro,287,COMPLETED,2,venda aprovada
+HP0030207905,Felipe Soares Fidalgo,ChatGPT Pro,287,COMPLETED,2,venda aprovada
+HP3592919779,YASMIN ALLGAYER SOBE,AcademyPass,2847.01,APPROVED,1,venda aprovada
+HP3997091659,Leonardo Kemmelmeier Battaglin,AcademyPass,2846.96,APPROVED,1,venda aprovada
+HP1007238605,Gilberto Américo Just de Novaes,AcademyPass,2846.96,APPROVED,1,venda aprovada
+HP2152818326,Rodrigo Vaz Severo,AI Video Creator PRO,980,APPROVED,1,venda aprovada
+HP2009385251,PAULO FERNANDO AGUIAR,AcademyPass,2846.96,APPROVED,1,venda aprovada
+HP3723912838,Power 3 Soluções Digitais Humanizadas,Academy Pass,159.33,APPROVED,2,venda aprovada
+HP4283630543,bernie teixeira,ChatGPT Pro,287,APPROVED,1,venda aprovada
+HP1481104230,Longevidade Saudavel,AI Video Creator PRO,1180,APPROVED,1,venda aprovada
+HP2106321193,Raphael Monari Leal,AI Video Creator PRO,780,APPROVED,1,venda aprovada
+HP2184809969,Mylene Pereira Ramos Seidl,ChatGPT Pro,287,APPROVED,1,venda aprovada
+HP3373990553,fysi lab digital,AcademyPass,2847,APPROVED,2,venda aprovada
+HP2086002833,Caio Piovesan Toricelli,ChatGPT Pro,287,APPROVED,1,venda aprovada
+HP1690266425,Jeferson Sousa,AcademyPass,2847,APPROVED,1,venda aprovada
+HP1725278575,Luís Fernando Brandão Gomes,AcademyPass,2847.01,APPROVED,1,venda aprovada
+HP2616634508,Jaqueline de Lima Boeira,AcademyPass,2846.96,APPROVED,1,venda aprovada
+HP0931185849,João Augusto Pedreira,AI Video Creator PRO,980,APPROVED,1,venda aprovada
+HP4224159740,Daniel Franco,AcademyPass,2846.96,APPROVED,1,venda aprovada
+HP0185713215,Frederico Carvalho Junqueira,ChatGPT Pro,287,APPROVED,1,venda aprovada
+HP1335727677,Mikhael Rocha,ChatGPT Pro,90,APPROVED,1,venda aprovada
+HP0382719976,AVL APLICATIVOS LTDA,AI Video Creator PRO,980,APPROVED,1,venda aprovada
+HP1059801419,Lucas Kyoji Higa,AcademyPass,2847,APPROVED,2,venda aprovada
+HP3516882872,paulo barros,ChatGPT Pro,287,APPROVED,1,venda aprovada
