@@ -304,12 +304,13 @@ async function recordOrderEvent(
   order: CommerceOrder,
   action: string,
   httpStatus: number | null,
+  resolution: "ignore-duplicates" | "merge-duplicates" = "ignore-duplicates",
 ): Promise<void> {
   await databaseJson("/rest/v1/conta_azul_order_events?on_conflict=webhook_id", {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      prefer: "resolution=ignore-duplicates,return=minimal",
+      prefer: `resolution=${resolution},return=minimal`,
     },
     body: JSON.stringify({
       webhook_id: job.webhook_id,
@@ -747,6 +748,27 @@ async function fail(job: ClaimedJob, error: unknown): Promise<void> {
   });
 }
 
+interface ExternalPosting {
+  source_platform: string;
+  external_order_id: string;
+  posted_by: string;
+  conta_azul_event_id: string | null;
+}
+
+/**
+ * Transação já lançada na Conta Azul por outra fonte (SquadHub, manual). O
+ * worker nunca cria venda para ela; só registra e aponta para o que existe.
+ */
+async function getExternalPosting(order: CommerceOrder): Promise<ExternalPosting | null> {
+  const rows = await databaseJson(
+    `/rest/v1/conta_azul_external_postings?select=source_platform,external_order_id,posted_by,conta_azul_event_id&source_platform=eq.${
+      encodeURIComponent(order.sourcePlatform)
+    }&external_order_id=eq.${encodeURIComponent(order.externalOrderId)}&limit=1`,
+    { method: "GET" },
+  ) as ExternalPosting[];
+  return rows[0] ?? null;
+}
+
 async function finalizeOrder(
   job: ClaimedJob,
   orderRow: OrderRow,
@@ -754,6 +776,7 @@ async function finalizeOrder(
   action: string,
   httpStatus: number | null,
   extra: JsonObject = {},
+  queued = true,
 ): Promise<OrderRow> {
   const updated = await patchOrder(orderRow.id, {
     source_customer_id: order.customer.sourceId,
@@ -768,8 +791,8 @@ async function finalizeOrder(
     last_synced_at: new Date().toISOString(),
     ...extra,
   });
-  await recordOrderEvent(job, updated, order, action, httpStatus);
-  await complete(job, httpStatus);
+  await recordOrderEvent(job, updated, order, action, httpStatus, queued ? "ignore-duplicates" : "merge-duplicates");
+  if (queued) await complete(job, httpStatus);
   return updated;
 }
 
@@ -807,22 +830,45 @@ async function processJob(
     return "no_change";
   }
 
+  return await applyOrder(job, orderRow, order, true);
+}
+
+/**
+ * Leva o estado atual da ordem para a Conta Azul. É o mesmo caminho para o
+ * item vindo da fila (`queued = true`) e para a sincronização explícita de uma
+ * ordem (`queued = false`, sem ACK de fila). Toda decisão passa pelo vínculo
+ * em `conta_azul_orders`: com venda vinculada, só atualiza; sem venda, confere
+ * outra fonte, data de corte e valor antes de qualquer `POST`.
+ */
+async function applyOrder(
+  job: ClaimedJob,
+  orderRow: OrderRow,
+  order: CommerceOrder,
+  queued: boolean,
+): Promise<"created" | "updated" | "recorded" | "no_change"> {
   const action = desiredOrderAction(order.normalizedStatus, Boolean(orderRow.conta_azul_sale_id));
   if (action === "record_only") {
-    await finalizeOrder(job, orderRow, order, `recorded_${order.normalizedStatus}`, 200);
+    await finalizeOrder(job, orderRow, order, `recorded_${order.normalizedStatus}`, 200, {}, queued);
     return "recorded";
   }
 
   const mapping = await resolvePlatformMapping(order);
-  if (action === "upsert_sale" && !orderRow.conta_azul_sale_id && paidBeforeCutover(order, mapping)) {
-    await finalizeOrder(job, orderRow, order, "recorded_before_cutover", 200);
-    return "recorded";
-  }
-  // Pedido pago sem valor (cupom de 100%, cortesia) não tem evento financeiro:
-  // a Conta Azul recusa item com valor zero. Fica registrado localmente.
-  if (action === "upsert_sale" && !orderRow.conta_azul_sale_id && order.totalAmount <= 0) {
-    await finalizeOrder(job, orderRow, order, "recorded_zero_value", 200);
-    return "recorded";
+  if (action === "upsert_sale" && !orderRow.conta_azul_sale_id) {
+    const posting = await getExternalPosting(order);
+    if (posting) {
+      await finalizeOrder(job, orderRow, order, "recorded_external_posting", 200, {}, queued);
+      return "recorded";
+    }
+    if (paidBeforeCutover(order, mapping)) {
+      await finalizeOrder(job, orderRow, order, "recorded_before_cutover", 200, {}, queued);
+      return "recorded";
+    }
+    // Pedido pago sem valor (cupom de 100%, cortesia) não tem evento
+    // financeiro: a Conta Azul recusa item com valor zero. Fica registrado.
+    if (order.totalAmount <= 0) {
+      await finalizeOrder(job, orderRow, order, "recorded_zero_value", 200, {}, queued);
+      return "recorded";
+    }
   }
 
   let allocated = await allocateSaleNumber(orderRow);
@@ -845,11 +891,11 @@ async function processJob(
   }
 
   if (action === "cancel_sale" && !details) {
-    await finalizeOrder(job, orderRow, order, "cancel_without_sale", 200);
+    await finalizeOrder(job, orderRow, order, "cancel_without_sale", 200, {}, queued);
     return "recorded";
   }
   if (action === "annotate_sale" && !details) {
-    await finalizeOrder(job, orderRow, order, "partial_refund_without_sale", 200);
+    await finalizeOrder(job, orderRow, order, "partial_refund_without_sale", 200, {}, queued);
     return "recorded";
   }
 
@@ -862,7 +908,7 @@ async function processJob(
       conta_azul_sale_version: details.version,
       financial_account_id: mapping.financial_account_id,
       category_id: mapping.category_id,
-    });
+    }, queued);
     return "no_change";
   }
 
@@ -942,8 +988,70 @@ async function processJob(
     conta_azul_sale_version: details.version,
     financial_account_id: mapping.financial_account_id,
     category_id: mapping.category_id,
-  });
+  }, queued);
   return result;
+}
+
+/**
+ * Sincroniza explicitamente o estado de uma ordem a partir de um webhook já
+ * ingerido, fora da fila. Usado na virada retroativa: depois de registrar em
+ * `conta_azul_external_postings` o que outra fonte já lançou e de recuar a
+ * data de corte, cada ordem paga sem venda é levada por aqui, pelo mesmo
+ * caminho idempotente do worker. Um webhook mais antigo que o último estado
+ * conhecido da ordem é recusado para nunca regredir um cancelamento.
+ */
+async function syncOrderBySequence(ingestSequence: number): Promise<JsonObject> {
+  const rows = await databaseJson(
+    `/rest/v1/webhook_inbox?select=id,ingest_sequence,received_at,source_platform,source_event_type,body_sha256,body_json&ingest_sequence=eq.${ingestSequence}&limit=1`,
+    { method: "GET" },
+  ) as Array<{
+    id: string;
+    ingest_sequence: number;
+    received_at: string;
+    source_platform: string;
+    source_event_type: string | null;
+    body_sha256: string;
+    body_json: unknown;
+  }>;
+  const inbox = rows[0];
+  if (!inbox) throw new Error("Webhook not found for Conta Azul sync");
+  const inbound = classifyCommerceEvent(inbox.body_json, inbox.source_platform);
+  if (inbound.disposition !== "process_order") {
+    return { status: "not_an_order", entity_kind: inbound.entityKind, reason: inbound.reason };
+  }
+  const order = parseCommerceOrder(inbox.body_json, inbox.source_platform);
+  const job: ClaimedJob = {
+    message_id: 0,
+    attempt_number: 0,
+    webhook_id: inbox.id,
+    ingest_sequence: inbox.ingest_sequence,
+    received_at: inbox.received_at,
+    processing_started_at: new Date().toISOString(),
+    source_platform: inbox.source_platform,
+    source_event_type: inbox.source_event_type,
+    body_sha256: inbox.body_sha256,
+    body_json: inbox.body_json,
+  };
+  let orderRow = await getOrder(order.sourcePlatform, order.externalOrderId);
+  if (!orderRow) orderRow = await insertOrder(job, order);
+  if (orderRow.last_ingest_sequence > inbox.ingest_sequence) {
+    return {
+      status: "newer_event_exists",
+      external_order_id: order.externalOrderId,
+      last_ingest_sequence: orderRow.last_ingest_sequence,
+      last_action: orderRow.last_action,
+    };
+  }
+  const result = await applyOrder(job, orderRow, order, false);
+  const refreshed = await getOrderById(orderRow.id);
+  return {
+    status: "synced",
+    result,
+    external_order_id: order.externalOrderId,
+    last_action: refreshed.last_action,
+    sale_number: refreshed.conta_azul_sale_number,
+    sale_id: refreshed.conta_azul_sale_id,
+  };
 }
 
 async function refreshExistingSaleBySequence(ingestSequence: number): Promise<JsonObject> {
@@ -1028,12 +1136,32 @@ Deno.serve(async (request: Request): Promise<Response> => {
       operation?: unknown;
       ingest_sequence?: unknown;
     };
-    if (input.operation === "refresh_sale") {
+    if (input.operation === "refresh_sale" || input.operation === "sync_order") {
       const ingestSequence = Number(input.ingest_sequence);
       if (!Number.isSafeInteger(ingestSequence) || ingestSequence < 1) {
         return json({ error: "invalid_ingest_sequence" }, 400);
       }
-      return json(await refreshExistingSaleBySequence(ingestSequence));
+      // As operações explícitas também respeitam o lease global: nunca correm
+      // ao mesmo tempo que o processamento da fila.
+      const syncLease = crypto.randomUUID();
+      const held = await rpc("acquire_integration_worker_lease", {
+        p_destination: "conta_azul",
+        p_lease_token: syncLease,
+        p_lease_seconds: 120,
+      });
+      if (held !== true) return json({ status: "already_running" }, 202);
+      try {
+        return json(
+          input.operation === "refresh_sale"
+            ? await refreshExistingSaleBySequence(ingestSequence)
+            : await syncOrderBySequence(ingestSequence),
+        );
+      } finally {
+        await rpc("release_integration_worker_lease", {
+          p_destination: "conta_azul",
+          p_lease_token: syncLease,
+        }).catch(() => undefined);
+      }
     }
 
     const leaseToken = crypto.randomUUID();
