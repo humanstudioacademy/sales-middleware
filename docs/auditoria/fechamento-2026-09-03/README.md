@@ -79,6 +79,10 @@ O que esses lançamentos fazem com o resultado de agosto e setembro:
 | Reembolso ou chargeback nunca revertido | 20 | R$ 50.706,72 |
 | Total lançado pelo SquadHub no período | 152 | R$ 2.125.198,09 |
 
+Das 96 transações do período, 95 estão na Conta Azul pelo SquadHub. A única
+ausente, `HP2099834133`, foi reembolsada — não deveria mesmo virar receita, então
+o efeito é zero.
+
 O segundo item é o mais silencioso: o SquadHub lançava a receita na compra e
 nunca reagia ao reembolso, então 20 compras devolvidas continuam na Conta Azul
 como valor a receber. O middleware trata isso sozinho — cancela a venda e
