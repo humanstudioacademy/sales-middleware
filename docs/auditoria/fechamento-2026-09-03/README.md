@@ -94,6 +94,31 @@ Depois da exclusão, o middleware recria tudo no mesmo formato da Zouti: uma
 venda por transação, com baixa pelo valor líquido na data em que a Hotmart
 pagou, e o código `HP…` no NSU e nas observações.
 
+### Como excluir
+
+A API da Conta Azul não tem exclusão de lançamento financeiro — só de baixa e
+de cobrança. A remoção é pela tela, em lote:
+
+Financeiro › Visão de competência › mês **Agosto de 2026** › pesquisar
+`Venda Hotmart` › Mais filtros: Conta = Hotmart - Conta Corrente, Origem =
+Lançamento Financeiro › aumentar registros por página › marcar o checkbox do
+cabeçalho › **Excluir lançamento(s)**. Repetir até acabar (144 lançamentos) e
+fazer o mesmo em **Setembro de 2026** (8). Julho não entra no filtro.
+
+### Como relançar, depois da exclusão
+
+Um comando. Ele confere sozinho que não sobrou nenhum lançamento do SquadHub no
+período e se recusa a seguir se sobrar:
+
+```
+node --env-file=.env scripts/virar-hotmart-para-o-middleware.ts \
+  --sequences docs/auditoria/fechamento-2026-09-03/05-sequencias-para-relancar.txt --execute
+```
+
+Ele remove as proteções de `conta_azul_external_postings`, recua a data de
+corte para 01/08 e sincroniza os 187 eventos das 96 transações em ordem de
+ingestão. Resultado esperado: 75 vendas aprovadas e 21 canceladas.
+
 ## 3. Portal do Agent Lab
 
 Três causas deixavam comprador sem acesso, as três corrigidas:
