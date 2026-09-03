@@ -675,6 +675,11 @@ async function ensureSaleSettled(
     if (installments.length > 0) break;
   }
   if (installments.length === 0) throw new Error("Conta Azul sale returned no financial installments");
+  // Tarifas que a origem não informa no webhook e só aparecem no extrato da
+  // plataforma: pagamento dividido (o bloco `payment` descreve só uma das
+  // partes), antecipação, ajustes de conciliação. O financeiro registra em
+  // `platform_fee_adjustments` e elas entram na taxa da baixa.
+  const extraFees = await getPlatformFeeAdjustments(order);
   let latestStatus: number | null = null;
   for (const installment of installments) {
     const installmentId = stringId(installment);
@@ -683,7 +688,7 @@ async function ensureSaleSettled(
     const gross = numberValue(installment.valor)
       ?? numberValue(object(installment.detalhe_valor)?.valor_bruto)
       ?? order.totalAmount / installments.length;
-    const settlement = settlementComposition(order, gross, installments.length);
+    const settlement = settlementComposition(order, gross, installments.length, extraFees);
     const response = await contaAzulJson(
       `/v1/financeiro/eventos-financeiros/parcelas/${encodeURIComponent(installmentId)}/baixa`,
       {
@@ -710,6 +715,21 @@ async function ensureSaleSettled(
     latestStatus = response.status;
   }
   return latestStatus;
+}
+
+/**
+ * Soma das tarifas de extrato registradas para a transação. Positivo desconta
+ * do bruto; negativo devolve um valor retido a mais.
+ */
+async function getPlatformFeeAdjustments(order: CommerceOrder): Promise<number> {
+  const rows = await databaseJson(
+    `/rest/v1/platform_fee_adjustments?select=amount&source_platform=eq.${
+      encodeURIComponent(order.sourcePlatform)
+    }&external_reference=eq.${encodeURIComponent(order.externalOrderId)}`,
+    { method: "GET" },
+  ) as Array<{ amount: string | number }>;
+  const total = rows.reduce((sum, row) => sum + (numberValue(row.amount) ?? 0), 0);
+  return Math.round(total * 100) / 100;
 }
 
 async function reverseSaleSettlements(details: SaleDetails): Promise<number | null> {

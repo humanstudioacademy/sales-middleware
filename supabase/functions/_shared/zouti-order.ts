@@ -485,18 +485,20 @@ export function settlementComposition(
   order: CommerceOrder,
   installmentGross: number,
   installmentCount: number,
+  extraFees = 0,
 ): { taxa: number; liquido: number } {
   const round = (value: number) => Math.round(value * 100) / 100;
   const charged = order.paymentAmount ?? order.totalAmount;
-  if (order.netAmount === null || charged <= 0) {
-    const taxa = round(Math.min(order.feeAmount ?? 0, installmentGross));
-    return { taxa, liquido: round(installmentGross - taxa) };
-  }
-  // Rateia proporcionalmente quando a venda tem mais de uma parcela.
-  const share = installmentCount > 1 ? installmentGross / charged : 1;
-  const deductions = Math.max(0, charged - order.netAmount);
-  const taxa = round(Math.min(deductions * share, installmentGross));
-  return { taxa, liquido: round(installmentGross - taxa) };
+  // Rateia proporcionalmente quando a Conta Azul cria mais de uma parcela.
+  const share = installmentCount > 1 && order.totalAmount > 0 ? installmentGross / order.totalAmount : 1;
+  // No pagamento dividido o bloco `payment` cobre só uma das partes, então o
+  // líquido informado não vale para a ordem inteira: a taxa conhecida fica
+  // sendo a tarifa daquela parte, e o resto entra por `platform_fee_adjustments`.
+  const known = order.netAmount === null || charged <= 0 || order.isSplitPayment
+    ? (order.feeAmount ?? 0)
+    : Math.max(0, charged - order.netAmount);
+  const taxa = round(Math.min((known + extraFees) * share, installmentGross));
+  return { taxa: Math.max(0, taxa), liquido: round(installmentGross - Math.max(0, taxa)) };
 }
 
 export function contaAzulPaymentMethod(order: CommerceOrder): string {

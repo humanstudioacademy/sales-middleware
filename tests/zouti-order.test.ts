@@ -418,6 +418,35 @@ test("charges the platform's full deduction as the settlement fee", () => {
   // A taxa nunca ultrapassa o valor da parcela.
   const gratuito = settlementComposition(parcelada, 0, 1);
   assert.equal(gratuito.taxa, 0);
+
+  // Tarifa de extrato registrada à mão entra na composição.
+  assert.equal(settlementComposition(parcelada, 2782.45, 1, 12.5).taxa, 456.72);
+
+  // Pagamento dividido: `payment` descreve só uma das partes, então o líquido
+  // dela não vale para a ordem inteira e vale a tarifa conhecida.
+  const dividido = parseZoutiOrder({
+    ...paidPayload,
+    amount_total: 4990,
+    amount_total_in_brl: 49.9,
+    is_split_payment: true,
+    payment: {
+      method: "PIX",
+      installments: 1,
+      amount: 500,
+      amount_in_brl: 5,
+      fee: 114,
+      fee_in_brl: 1.14,
+      net_amount: 386,
+      net_amount_in_brl: 3.86,
+    },
+    split_payments: [
+      { role: "PAYMENT_0", method: "CREDIT_CARD", amount: 4490 },
+      { role: "PAYMENT_1", method: "PIX", amount: 500 },
+    ],
+  }, "zouti");
+  assert.equal(dividido.isSplitPayment, true);
+  assert.deepEqual(settlementComposition(dividido, 49.9, 1), { taxa: 1.14, liquido: 48.76 });
+  assert.deepEqual(settlementComposition(dividido, 49.9, 1, 2.1), { taxa: 3.24, liquido: 46.66 });
 });
 
 test("resumes the same queue delivery after persisting its order row", () => {
