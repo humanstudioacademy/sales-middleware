@@ -7,15 +7,17 @@ import {
   type ResolvedOffer,
   type StudentPortalOffer,
 } from "../_shared/student-portal.ts";
+import { classifyCommerceEvent, parseCommerceOrder } from "../_shared/commerce-order.ts";
 import {
-  classifyInboundCommerceEvent,
   classifyOrderTransition,
   type CommerceOrder,
-  parseZoutiOrder,
 } from "../_shared/zouti-order.ts";
 import { authenticateBearerToken } from "../_shared/webhook.ts";
 
 type JsonObject = Record<string, unknown>;
+
+/** Plataformas cujo FIFO este worker consome, cada uma na sua ordem. */
+const SUPPORTED_PLATFORMS = ["zouti", "hotmart"] as const;
 
 interface ClaimedJob {
   message_id: number;
@@ -218,6 +220,7 @@ async function deliver(
   const request = buildEnrollmentRequest({
     action,
     editionCode: offer.editionCode,
+    grantsReplay: offer.grantsReplay,
     order,
     item: offer.item,
     destinationUrl: requiredEnvironment("STUDENT_PORTAL_WEBHOOK_URL"),
@@ -276,14 +279,14 @@ async function processJob(
     return "recorded";
   }
 
-  const inbound = classifyInboundCommerceEvent(job.body_json, job.source_platform);
+  const inbound = classifyCommerceEvent(job.body_json, job.source_platform);
   if (inbound.disposition === "defer") {
     await skipEvent(job, inbound);
     await complete(job, 200);
     return "skipped";
   }
 
-  const order = parseZoutiOrder(job.body_json, job.source_platform);
+  const order = parseCommerceOrder(job.body_json, job.source_platform);
   const offers = await listOffers(order.sourcePlatform, order.sourceCreatedAt);
   const offer = resolveEnrollmentOffer(order, offers);
   if (!offer) {
@@ -366,22 +369,37 @@ Deno.serve(async (request: Request): Promise<Response> => {
 
     try {
       const result = { claimed: 0, granted: 0, revoked: 0, recorded: 0, skipped: 0, failed: 0 };
-      for (let index = 0; index < batchSize; index += 1) {
-        const jobs = await rpc("claim_integration_jobs", {
-          p_destination: "student_portal",
-          p_batch_size: 1,
-          p_source_platform: "zouti",
-        }) as ClaimedJob[];
-        const job = jobs[0];
-        if (!job) break;
-        result.claimed += 1;
-        try {
-          result[await processJob(job)] += 1;
-        } catch (error) {
-          await fail(job, error);
-          result.failed += 1;
-          break;
+      // Cada plataforma tem o seu FIFO. A elegibilidade continua vindo do
+      // produto vendido: uma venda de plataforma sem oferta cadastrada é
+      // registrada como pulada, nunca fica pendente para sempre.
+      const platforms = new Set(SUPPORTED_PLATFORMS);
+      const startedAt = Date.now();
+
+      while (result.claimed < batchSize && platforms.size > 0 && Date.now() - startedAt < 100_000) {
+        let progressed = false;
+        for (const platform of [...platforms]) {
+          if (result.claimed >= batchSize || Date.now() - startedAt >= 100_000) break;
+          const jobs = await rpc("claim_integration_jobs", {
+            p_destination: "student_portal",
+            p_batch_size: 1,
+            p_source_platform: platform,
+          }) as ClaimedJob[];
+          const job = jobs[0];
+          if (!job) {
+            platforms.delete(platform);
+            continue;
+          }
+          progressed = true;
+          result.claimed += 1;
+          try {
+            result[await processJob(job)] += 1;
+          } catch (error) {
+            await fail(job, error);
+            result.failed += 1;
+            platforms.delete(platform);
+          }
         }
+        if (!progressed) break;
       }
       return json(result);
     } finally {
