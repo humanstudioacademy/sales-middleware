@@ -404,7 +404,15 @@ O que cada transição faz na venda já vinculada:
 | `paid` (aprovada, completa) | cria a venda e a baixa | atualiza a mesma venda (`PUT`), baixa já existente é mantida |
 | `pending` (boleto, PIX aguardando, atraso) | registra localmente | registra localmente |
 | `rejected` (expirada, sem fundos) | registra localmente | registra localmente |
+| `partially_refunded` (devolução menor que o cobrado) | registra localmente | mantém a venda aprovada e baixada; anota na mesma venda o valor devolvido e o mantido |
 | `cancelled`, `refunded`, `chargeback` | registra localmente | estorna a baixa e cancela a mesma venda |
+
+Reembolso parcial: na Zouti ele vem em `payment.amount_refunded` (mesmo com
+`status: PAID`); na Hotmart vem só como `PARTIALLY_REFUNDED`, sem valor, e a
+anotação marca "conferir no extrato". Um parcial nunca regride para "pago";
+avança só para outro parcial maior ou para uma reversão terminal. O valor fica
+em `conta_azul_orders.refunded_amount`. A saída de caixa do reembolso não é
+lançada automaticamente como conta a pagar; conciliar no extrato da plataforma.
 
 "Aprovada" seguida de "completa" (fim da garantia) é o caso típico: são dois
 webhooks da mesma transação, com o mesmo `HP…`, e produzem uma venda só.

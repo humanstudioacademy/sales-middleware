@@ -80,7 +80,10 @@ export function normalizeHotmartStatus(value: unknown): NormalizedOrderStatus {
   const status = String(value ?? "").trim().toUpperCase();
   if (["APPROVED", "COMPLETED", "COMPLETE"].includes(status)) return "paid";
   if (["CANCELED", "CANCELLED"].includes(status)) return "cancelled";
-  if (["REFUNDED", "PARTIALLY_REFUNDED"].includes(status)) return "refunded";
+  if (status === "REFUNDED") return "refunded";
+  // A Hotmart sinaliza o parcial só pelo status; o valor devolvido não vem no
+  // webhook e fica marcado para conferência no extrato.
+  if (status === "PARTIALLY_REFUNDED") return "partially_refunded";
   if (status === "CHARGEBACK") return "chargeback";
   if (["EXPIRED", "BLOCKED", "NO_FUNDS"].includes(status)) return "rejected";
   if (
@@ -366,6 +369,7 @@ export function parseHotmartOrder(body: unknown): CommerceOrder {
     paymentAmount: amounts.paymentAmount,
     netAmount: amounts.netAmount,
     feeAmount: amounts.feeAmount,
+    refundedAmount: null,
     interestAmount: amounts.interestAmount,
     interestTransferAmount: null,
     paymentMethod: optionalString(payment?.type)?.toUpperCase() ?? null,

@@ -306,6 +306,39 @@ test("refund and chargeback cancel the linked sale and never regress", () => {
   assert.equal(classifyOrderTransition(refundedState, approvedAgain, 103, "d".repeat(64)), "stale");
 });
 
+test("a Hotmart partial refund annotates the same sale and flags the unknown amount", () => {
+  assert.equal(normalizeHotmartStatus("PARTIALLY_REFUNDED"), "partially_refunded");
+  const partial = parseHotmartOrder({
+    ...hotmartEvent("PURCHASE_REFUNDED", "PARTIALLY_REFUNDED"),
+    creation_date: 1785986987648,
+  });
+  assert.equal(partial.normalizedStatus, "partially_refunded");
+  assert.equal(partial.refundedAmount, null);
+  assert.equal(desiredOrderAction(partial.normalizedStatus, true), "annotate_sale");
+  assert.equal(desiredOrderAction(partial.normalizedStatus, false), "record_only");
+
+  const paidState = {
+    lastIngestSequence: 100,
+    lastSourceUpdatedAt: "2026-08-02T14:21:18.242Z",
+    payloadFingerprint: "a".repeat(64),
+    normalizedStatus: "paid" as const,
+    lastAction: "sale_created",
+  };
+  assert.equal(classifyOrderTransition(paidState, partial, 101, "b".repeat(64)), "apply");
+
+  const sale = buildContaAzulSale(partial, {
+    customerId: "customer-uuid",
+    productIds: ["service-uuid"],
+    saleNumber: 24480,
+    financialAccountId: "hotmart-account-uuid",
+    categoryId: null,
+    situation: "APROVADO",
+  });
+  assert.equal(sale.situacao, "APROVADO");
+  assert.match(String(sale.observacoes), /REEMBOLSO PARCIAL/);
+  assert.match(String(sale.observacoes), /não informado pela plataforma/);
+});
+
 test("pending Hotmart purchases are recorded without touching Conta Azul", () => {
   const billet = parseHotmartOrder(hotmartEvent("PURCHASE_BILLET_PRINTED", "BILLET_PRINTED"));
   assert.equal(billet.normalizedStatus, "pending");

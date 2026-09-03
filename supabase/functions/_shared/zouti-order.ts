@@ -4,6 +4,7 @@ export type NormalizedOrderStatus =
   | "rejected"
   | "cancelled"
   | "refunded"
+  | "partially_refunded"
   | "chargeback"
   | "unknown";
 
@@ -49,6 +50,8 @@ export interface CommerceOrder {
   paymentAmount: number | null;
   netAmount: number | null;
   feeAmount: number | null;
+  /** Valor devolvido ao comprador até este evento; null quando a origem não informa. */
+  refundedAmount: number | null;
   interestAmount: number | null;
   interestTransferAmount: number | null;
   paymentMethod: string | null;
@@ -174,7 +177,8 @@ export function normalizeOrderStatus(value: unknown): NormalizedOrderStatus {
   if (["PAID", "APPROVED", "COMPLETED", "SUCCESS", "SUCCEEDED"].includes(status)) return "paid";
   if (["REFUSED", "REJECTED", "DECLINED", "FAILED", "REPROVED", "DENIED"].includes(status)) return "rejected";
   if (["CANCELLED", "CANCELED", "VOIDED"].includes(status)) return "cancelled";
-  if (["REFUNDED", "REFUND", "FULLY_REFUNDED", "PARTIALLY_REFUNDED"].includes(status)) return "refunded";
+  if (["REFUNDED", "REFUND", "FULLY_REFUNDED"].includes(status)) return "refunded";
+  if (["PARTIALLY_REFUNDED", "PARTIAL_REFUND"].includes(status)) return "partially_refunded";
   if (["CHARGEBACK", "CHARGED_BACK", "DISPUTED", "DISPUTE"].includes(status)) return "chargeback";
   if (["PENDING", "WAITING", "AWAITING_PAYMENT", "UNPAID", "CREATED", "PROCESSING", "AUTHORIZED"].includes(status)) return "pending";
   return "unknown";
@@ -295,6 +299,24 @@ export function parseZoutiOrder(body: unknown, sourcePlatform: string): Commerce
   const email = optionalString(customer.email)?.toLowerCase() ?? null;
   const createdAt = isoDateTime(root.created_at, "created_at");
   const updatedAt = isoDateTime(root.updated_at ?? root.created_at, "updated_at");
+  const paymentAmount = payment ? optionalMoney(payment.amount_in_brl, payment.amount, "payment.amount") : null;
+  const refundedAmount = payment
+    ? optionalMoney(payment.amount_refunded_in_brl, payment.amount_refunded, "payment.amount_refunded")
+    : null;
+  // A Zouti pode manter `status: PAID` e informar a devolução só em
+  // `payment.amount_refunded`. Devolução menor que o cobrado é reembolso
+  // parcial; igual ou maior é reembolso total. O status declarado nunca é
+  // rebaixado por este cálculo — só refinado.
+  let normalizedStatus = normalizeOrderStatus(sourceStatus);
+  const chargedAmount = paymentAmount ?? totalAmount;
+  if (refundedAmount !== null && refundedAmount > 0 && chargedAmount > 0) {
+    if (normalizedStatus === "paid") {
+      normalizedStatus = refundedAmount < chargedAmount ? "partially_refunded" : "refunded";
+    } else if (normalizedStatus === "refunded" && refundedAmount < chargedAmount) {
+      normalizedStatus = "partially_refunded";
+    }
+  }
+
   const attribution = Object.fromEntries([
     ["utm_source", optionalString(utm?.utm_source) ?? optionalString(tracking?.source)],
     ["utm_medium", optionalString(utm?.utm_medium) ?? optionalString(tracking?.medium)],
@@ -309,15 +331,16 @@ export function parseZoutiOrder(body: unknown, sourcePlatform: string): Commerce
     sourcePlatform: normalizePlatform(optionalString(root.provider) ?? sourcePlatform),
     externalOrderId: requiredString(root.id, "id"),
     sourceStatus,
-    normalizedStatus: normalizeOrderStatus(sourceStatus),
+    normalizedStatus,
     sourceCreatedAt: createdAt,
     sourceUpdatedAt: updatedAt,
     currency: requiredString(root.currency, "currency").toUpperCase(),
     subtotalAmount: optionalMoney(root.amount_subtotal_in_brl, root.amount_subtotal, "amount_subtotal"),
     totalAmount,
-    paymentAmount: payment ? optionalMoney(payment.amount_in_brl, payment.amount, "payment.amount") : null,
+    paymentAmount,
     netAmount: payment ? optionalMoney(payment.net_amount_in_brl, payment.net_amount, "payment.net_amount") : null,
     feeAmount: payment ? optionalMoney(payment.fee_in_brl, payment.fee, "payment.fee") : null,
+    refundedAmount,
     interestAmount: payment
       ? optionalMoney(payment.interest_amount_in_brl, payment.interest_amount, "payment.interest_amount")
       : null,
@@ -393,14 +416,31 @@ export function classifyOrderTransition(
   if (existing.normalizedStatus === "paid" && ["pending", "rejected", "unknown"].includes(incoming.normalizedStatus)) {
     return "stale";
   }
+  // Um reembolso parcial já registrado não volta a "pago" nem a estados
+  // anteriores; só avança para outro parcial (valor maior) ou para uma
+  // reversão terminal.
+  if (
+    existing.normalizedStatus === "partially_refunded" &&
+    ["paid", "pending", "rejected", "unknown"].includes(incoming.normalizedStatus)
+  ) {
+    return "stale";
+  }
   return "apply";
 }
 
+/**
+ * - `paid` cria ou atualiza a venda aprovada;
+ * - `partially_refunded` mantém a venda aprovada e baixada e anota nela o
+ *   valor devolvido e o valor retido (`annotate_sale`);
+ * - reversões terminais cancelam a venda vinculada;
+ * - sem venda vinculada, tudo que não é pagamento só é registrado.
+ */
 export function desiredOrderAction(
   status: NormalizedOrderStatus,
   hasSale: boolean,
-): "upsert_sale" | "cancel_sale" | "record_only" {
+): "upsert_sale" | "annotate_sale" | "cancel_sale" | "record_only" {
   if (status === "paid") return "upsert_sale";
+  if (hasSale && status === "partially_refunded") return "annotate_sale";
   if (hasSale && ["cancelled", "refunded", "chargeback"].includes(status)) return "cancel_sale";
   return "record_only";
 }
@@ -525,9 +565,35 @@ function statusLabel(status: NormalizedOrderStatus): string {
     rejected: "Recusado/reprovado",
     cancelled: "Cancelado",
     refunded: "Reembolsado",
+    partially_refunded: "Reembolsado parcialmente",
     chargeback: "Chargeback/contestação",
     unknown: "Não mapeado",
   }[status];
+}
+
+/**
+ * Bloco de reembolso parcial. Ele vai para a mesma venda da Conta Azul: a venda
+ * continua aprovada e baixada, e o registro passa a dizer quanto foi devolvido
+ * e quanto ficou. Sem valor informado pela origem (Hotmart), o bloco marca a
+ * pendência de conferência em vez de inventar um número.
+ */
+function refundLines(order: CommerceOrder): string[] {
+  const refunded = order.refundedAmount;
+  if (order.normalizedStatus !== "partially_refunded" && !(refunded !== null && refunded > 0)) return [];
+  const charged = order.paymentAmount ?? order.totalAmount;
+  if (refunded === null) {
+    return [
+      "REEMBOLSO PARCIAL",
+      "Valor reembolsado: não informado pela plataforma — conferir no extrato",
+      `Data do reembolso: ${order.sourceUpdatedAt}`,
+    ];
+  }
+  return [
+    "REEMBOLSO PARCIAL",
+    `Valor reembolsado: ${brl(refunded)}`,
+    `Valor mantido: ${brl(Math.max(0, Math.round((charged - refunded) * 100) / 100))} de ${brl(charged)}`,
+    `Data do reembolso: ${order.sourceUpdatedAt}`,
+  ];
 }
 
 function paymentDescription(order: CommerceOrder): string {
@@ -544,6 +610,7 @@ function paymentDescription(order: CommerceOrder): string {
     order.interestTransferAmount === null ? null : `Juros repassados: ${brl(order.interestTransferAmount)}`,
     `Taxa da plataforma: ${brl(order.feeAmount ?? 0)}`,
     `Valor líquido: ${brl(order.netAmount ?? order.totalAmount)}`,
+    ...refundLines(order),
   ].filter((line): line is string => Boolean(line));
   if (order.splitPayments.length) {
     lines.push("Divisão do pagamento:");
@@ -572,6 +639,7 @@ function saleDescription(
     trace?.eventType ? `Evento de entrada: ${trace.eventType}` : null,
     trace ? `Webhook: ${trace.webhookId}` : null,
     trace ? `Sequência de ingestão: ${trace.ingestSequence}` : null,
+    ...(refundLines(order).length ? ["", ...refundLines(order)] : []),
     "",
     "ITENS",
     ...order.items.flatMap((item, index) => [

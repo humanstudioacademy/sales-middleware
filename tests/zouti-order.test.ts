@@ -239,6 +239,76 @@ test("never reactivates a cancelled order and ignores an identical paid webhook"
   }, 41, "c".repeat(64)), "stale");
 });
 
+test("keeps a partially refunded sale alive and annotates it instead of cancelling", () => {
+  const partial = parseZoutiOrder({
+    ...paidPayload,
+    updated_at: "2026-08-10T10:00:00.000Z",
+    payment: { ...paidPayload.payment, amount_refunded: 5000 },
+  }, "zouti");
+  assert.equal(partial.normalizedStatus, "partially_refunded");
+  assert.equal(partial.refundedAmount, 50);
+  assert.equal(desiredOrderAction(partial.normalizedStatus, true), "annotate_sale");
+  assert.equal(desiredOrderAction(partial.normalizedStatus, false), "record_only");
+
+  const fullyRefundedWhilePaid = parseZoutiOrder({
+    ...paidPayload,
+    payment: { ...paidPayload.payment, amount_refunded: paidPayload.payment.amount },
+  }, "zouti");
+  assert.equal(fullyRefundedWhilePaid.normalizedStatus, "refunded");
+
+  const explicitPartial = parseZoutiOrder({ ...paidPayload, status: "PARTIALLY_REFUNDED" }, "zouti");
+  assert.equal(explicitPartial.normalizedStatus, "partially_refunded");
+
+  const paid = parseZoutiOrder(paidPayload, "zouti");
+  const paidState = {
+    lastIngestSequence: 50,
+    lastSourceUpdatedAt: paid.sourceUpdatedAt,
+    payloadFingerprint: "a".repeat(64),
+    normalizedStatus: "paid" as const,
+    lastAction: "sale_created",
+  };
+  assert.equal(classifyOrderTransition(paidState, partial, 51, "b".repeat(64)), "apply");
+
+  const partialState = {
+    ...paidState,
+    lastIngestSequence: 51,
+    lastSourceUpdatedAt: partial.sourceUpdatedAt,
+    payloadFingerprint: "b".repeat(64),
+    normalizedStatus: "partially_refunded" as const,
+    lastAction: "sale_partially_refunded",
+  };
+  const paidAgain = parseZoutiOrder({ ...paidPayload, updated_at: "2026-08-11T10:00:00.000Z" }, "zouti");
+  const biggerPartial = parseZoutiOrder({
+    ...paidPayload,
+    updated_at: "2026-08-12T10:00:00.000Z",
+    payment: { ...paidPayload.payment, amount_refunded: 7000 },
+  }, "zouti");
+  const refunded = parseZoutiOrder({
+    ...paidPayload,
+    status: "REFUNDED",
+    updated_at: "2026-08-13T10:00:00.000Z",
+    payment: { ...paidPayload.payment, amount_refunded: paidPayload.payment.amount },
+  }, "zouti");
+  assert.equal(classifyOrderTransition(partialState, paidAgain, 52, "c".repeat(64)), "stale");
+  assert.equal(classifyOrderTransition(partialState, biggerPartial, 53, "d".repeat(64)), "apply");
+  assert.equal(classifyOrderTransition(partialState, refunded, 54, "e".repeat(64)), "apply");
+  assert.equal(desiredOrderAction(refunded.normalizedStatus, true), "cancel_sale");
+
+  const sale = buildContaAzulSale(partial, {
+    customerId: "customer-uuid",
+    productIds: ["product-uuid"],
+    saleNumber: 961,
+    financialAccountId: "account-uuid",
+    categoryId: null,
+    situation: "APROVADO",
+  });
+  assert.equal(sale.situacao, "APROVADO");
+  assert.match(String(sale.observacoes), /REEMBOLSO PARCIAL/);
+  assert.match(String(sale.observacoes), /Valor reembolsado: R\$ 50,00/);
+  assert.match(String(sale.observacoes), /Valor mantido: R\$ 47,90 de R\$ 97,90/);
+  assert.match(String(sale.observacoes_pagamento), /Valor reembolsado: R\$ 50,00/);
+});
+
 test("resumes the same queue delivery after persisting its order row", () => {
   const order = parseZoutiOrder(paidPayload, "zouti");
   assert.equal(classifyOrderTransition({

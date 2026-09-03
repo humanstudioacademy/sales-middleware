@@ -47,6 +47,7 @@ interface OrderRow {
   conta_azul_sale_version: number | null;
   financial_account_id: string | null;
   category_id: string | null;
+  refunded_amount: number | null;
   last_action: string;
   last_synced_at: string | null;
 }
@@ -759,6 +760,7 @@ async function finalizeOrder(
     last_ingest_sequence: job.ingest_sequence,
     last_source_updated_at: order.sourceUpdatedAt,
     payload_fingerprint: job.body_sha256,
+    refunded_amount: order.refundedAmount,
     last_action: action,
     last_synced_at: new Date().toISOString(),
     ...extra,
@@ -835,6 +837,10 @@ async function processJob(
 
   if (action === "cancel_sale" && !details) {
     await finalizeOrder(job, orderRow, order, "cancel_without_sale", 200);
+    return "recorded";
+  }
+  if (action === "annotate_sale" && !details) {
+    await finalizeOrder(job, orderRow, order, "partial_refund_without_sale", 200);
     return "recorded";
   }
 
@@ -916,7 +922,12 @@ async function processJob(
   if (action === "upsert_sale") {
     httpStatus = (await ensureSaleSettled(details, order, mapping.financial_account_id!)) ?? httpStatus;
   }
-  await finalizeOrder(job, orderRow, order, action === "cancel_sale" ? "sale_cancelled" : `sale_${result}`, httpStatus, {
+  const finalAction = action === "cancel_sale"
+    ? "sale_cancelled"
+    : action === "annotate_sale"
+    ? "sale_partially_refunded"
+    : `sale_${result}`;
+  await finalizeOrder(job, orderRow, order, finalAction, httpStatus, {
     conta_azul_customer_id: customerId,
     conta_azul_sale_id: details.id,
     conta_azul_sale_version: details.version,
@@ -981,6 +992,7 @@ async function refreshExistingSaleBySequence(ingestSequence: number): Promise<Js
     normalized_status: order.normalizedStatus,
     last_action: action === "cancel_sale" ? "sale_cancelled_refreshed" : "sale_refreshed",
     last_synced_at: new Date().toISOString(),
+    refunded_amount: order.refundedAmount,
     conta_azul_customer_id: customerId,
     conta_azul_sale_version: details.version,
   });
