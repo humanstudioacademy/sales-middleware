@@ -12,11 +12,19 @@ export interface StudentPortalOffer {
   enabled: boolean;
   starts_at: string;
   ends_at: string | null;
+  /**
+   * O produto dá acesso ao conteúdo gravado além da edição ao vivo. É por
+   * produto, não por edição: na mesma turma convivem quem comprou só o ingresso
+   * e quem comprou o formato de aulas.
+   */
+  grants_replay: boolean;
 }
 
 export interface ResolvedOffer {
   editionCode: string;
   item: CommerceItem;
+  /** Verdadeiro quando qualquer item da ordem libera o replay. */
+  grantsReplay: boolean;
 }
 
 /**
@@ -28,6 +36,7 @@ export interface MatriculaPayload {
   email: string;
   edicao: string;
   nome: string;
+  temReplay: boolean;
   origem: string;
 }
 
@@ -80,7 +89,9 @@ export function resolveEnrollmentOffer(
   const matches: ResolvedOffer[] = [];
   for (const item of order.items) {
     const offer = active.get(item.sourceId.trim());
-    if (offer) matches.push({ editionCode: offer.edition_code, item });
+    if (offer) {
+      matches.push({ editionCode: offer.edition_code, item, grantsReplay: offer.grants_replay });
+    }
   }
   if (matches.length === 0) return null;
 
@@ -92,7 +103,10 @@ export function resolveEnrollmentOffer(
       }`,
     );
   }
-  return matches[0];
+  // O replay é união, não "o primeiro item": uma ordem que traz ingresso e
+  // formato de aulas junto tem de liberar o gravado. Sem isso, a ordem dos
+  // itens no payload decidiria silenciosamente o acesso do aluno.
+  return { ...matches[0], grantsReplay: matches.some((match) => match.grantsReplay) };
 }
 
 /**
@@ -137,11 +151,13 @@ export function revocationReason(status: NormalizedOrderStatus): string {
 export function buildMatriculaPayload(
   order: CommerceOrder,
   editionCode: string,
+  grantsReplay = false,
 ): MatriculaPayload {
   return {
     email: requiredEmail(order),
     edicao: editionCode,
     nome: order.customer.name,
+    temReplay: grantsReplay,
     origem: order.sourcePlatform,
   };
 }
@@ -161,6 +177,7 @@ export function buildRevogacaoPayload(
 export function buildEnrollmentRequest(input: {
   action: "grant" | "revoke";
   editionCode: string;
+  grantsReplay?: boolean;
   order: CommerceOrder;
   item: CommerceItem;
   destinationUrl: string;
@@ -168,7 +185,7 @@ export function buildEnrollmentRequest(input: {
   trace: { webhookId: string; ingestSequence: number; bodySha256: string };
 }): EnrollmentRequest {
   const payload = input.action === "grant"
-    ? buildMatriculaPayload(input.order, input.editionCode)
+    ? buildMatriculaPayload(input.order, input.editionCode, input.grantsReplay ?? false)
     : buildRevogacaoPayload(input.order, input.editionCode);
   const headers = new Headers({
     "content-type": "application/json",

@@ -48,6 +48,7 @@ const offers: StudentPortalOffer[] = [{
   enabled: true,
   starts_at: "2026-08-04T03:00:00.000Z",
   ends_at: "2026-09-20T03:00:00.000Z",
+  grants_replay: false,
 }];
 
 /** Mesmo produto, janela seguinte: a turma vira sem trocar a oferta na Zouti. */
@@ -166,9 +167,10 @@ test("monta exatamente o corpo aceito por /functions/v1/matricula", () => {
     email: "aluna@example.test",
     edicao: "agent-lab-3",
     nome: "Aluna Exemplo",
+    temReplay: false,
     origem: "zouti",
   });
-  assert.deepEqual(Object.keys(payload), ["email", "edicao", "nome", "origem"]);
+  assert.deepEqual(Object.keys(payload), ["email", "edicao", "nome", "temReplay", "origem"]);
 });
 
 test("para a matrícula quando a ordem não tem e-mail", () => {
@@ -254,6 +256,63 @@ test("autentica pelo header do portal e mantém o rastro da entrega", () => {
     email: "aluna@example.test",
     edicao: "agent-lab-3",
     nome: "Aluna Exemplo",
+    temReplay: false,
     origem: "zouti",
   });
+});
+
+/**
+ * O formato de aulas é outro produto dentro da mesma edição. Antes disso o
+ * middleware nunca mandava `temReplay`, então quem comprava o gravado entrava
+ * na turma com o replay trancado.
+ */
+const replayOffer: StudentPortalOffer = {
+  ...offers[0],
+  source_product_id: "prod_agentlab_agl3_aulas",
+  product_label: "AgentLab 3 em formato de aulas",
+  grants_replay: true,
+};
+
+const itemDeAulas = {
+  ...agentLabPayload.items[0],
+  product_id: "prod_agentlab_agl3_aulas",
+  name: "AgentLab em formato de aulas",
+};
+
+test("só o ingresso não libera o replay", () => {
+  const resolved = resolveEnrollmentOffer(orderWith(), [offers[0], replayOffer])!;
+  assert.equal(resolved.grantsReplay, false);
+  assert.equal(buildMatriculaPayload(orderWith(), resolved.editionCode, resolved.grantsReplay).temReplay, false);
+});
+
+test("o formato de aulas libera o replay na mesma edição", () => {
+  const order = orderWith({ items: [itemDeAulas] });
+  const resolved = resolveEnrollmentOffer(order, [offers[0], replayOffer])!;
+  assert.equal(resolved.editionCode, "agent-lab-3");
+  assert.equal(resolved.grantsReplay, true);
+  assert.equal(buildMatriculaPayload(order, resolved.editionCode, resolved.grantsReplay).temReplay, true);
+});
+
+test("ingresso e aulas na mesma ordem liberam o replay, em qualquer ordem dos itens", () => {
+  const catalogo = [offers[0], replayOffer];
+  for (const items of [[agentLabPayload.items[0], itemDeAulas], [itemDeAulas, agentLabPayload.items[0]]]) {
+    const resolved = resolveEnrollmentOffer(orderWith({ items }), catalogo)!;
+    assert.equal(resolved.editionCode, "agent-lab-3");
+    assert.equal(resolved.grantsReplay, true);
+  }
+});
+
+test("a revogação continua sem temReplay: o corpo é outro contrato", () => {
+  const order = orderWith({ status: "REFUNDED", updated_at: "2026-08-10T12:00:00.000Z" });
+  const request = buildEnrollmentRequest({
+    action: "revoke",
+    editionCode: "agent-lab-3",
+    grantsReplay: true,
+    order,
+    item: order.items[0],
+    destinationUrl: "https://portal.example.test/functions/v1/matricula",
+    token: "token-de-teste",
+    trace,
+  });
+  assert.equal(JSON.parse(request.body).temReplay, undefined);
 });
