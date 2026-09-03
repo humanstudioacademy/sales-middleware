@@ -27,15 +27,25 @@ select
 from public.student_portal_skipped_events as skipped
 join public.webhook_inbox as inbox on inbox.id = skipped.webhook_id
 where skipped.reason = 'no_student_portal_offer_mapped'
+  -- O produto vem em formatos diferentes por plataforma; a janela da oferta
+  -- não é conferida aqui de propósito: quem decide é o worker, que aplica a
+  -- mesma regra de sempre e volta a pular o que estiver fora dela.
   and exists (
     select 1
-    from jsonb_array_elements(inbox.body_json -> 'items') as item
-    join public.student_portal_offers as offer
-      on offer.source_product_id = item ->> 'product_id'
-     and lower(offer.source_platform) = lower(inbox.source_platform)
+    from public.student_portal_offers as offer
     where offer.enabled
-      and inbox.body_json ->> 'created_at' >= to_char(offer.starts_at at time zone 'UTC', 'YYYY-MM-DD')
-      and (offer.ends_at is null or inbox.body_json ->> 'created_at' < to_char(offer.ends_at at time zone 'UTC', 'YYYY-MM-DD'))
+      and lower(offer.source_platform) = lower(inbox.source_platform)
+      and (
+        offer.source_product_id = inbox.body_json -> 'data' -> 'product' ->> 'id'
+        or exists (
+          select 1
+          from jsonb_array_elements(
+            case when jsonb_typeof(inbox.body_json -> 'items') = 'array'
+              then inbox.body_json -> 'items' else '[]'::jsonb end
+          ) as item
+          where item ->> 'product_id' = offer.source_product_id
+        )
+      )
   );
 
 delete from public.student_portal_skipped_events
