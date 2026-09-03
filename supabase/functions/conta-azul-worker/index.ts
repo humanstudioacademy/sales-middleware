@@ -435,29 +435,46 @@ async function ensureCustomer(order: CommerceOrder): Promise<string> {
   if (order.customer.email) identifiers.push(["emails", order.customer.email]);
   if (order.customer.phone) identifiers.push(["telefones", order.customer.phone]);
 
-  const matchGroups: string[][] = [];
-  for (const [field, value] of identifiers) {
-    const query = new URLSearchParams({
-      pagina: "1",
-      tamanho_pagina: "10",
-      tipo_perfil: "Cliente",
-      [field]: value,
-    });
-    const search = await contaAzulJson(`/v1/pessoas?${query}`, { method: "GET" }, `customer lookup by ${field}`);
-    const matches = arrayFrom(search.value).map(stringId).filter((id): id is string => Boolean(id));
-    if (matches.length > 1) throw new Error(`Conta Azul customer lookup by ${field} returned multiple matches`);
-    matchGroups.push(matches);
+  async function lookupCustomer(onlyClients: boolean): Promise<string | null> {
+    const matchGroups: string[][] = [];
+    for (const [field, value] of identifiers) {
+      const query = new URLSearchParams({ pagina: "1", tamanho_pagina: "10", [field]: value });
+      // A busca padrão restringe ao perfil Cliente. Um contato já cadastrado
+      // como fornecedor ou transportadora não aparece nela, mas ocupa o
+      // documento: a criação falha com "já existe uma pessoa cadastrada".
+      if (onlyClients) query.set("tipo_perfil", "Cliente");
+      const search = await contaAzulJson(`/v1/pessoas?${query}`, { method: "GET" }, `customer lookup by ${field}`);
+      const matches = arrayFrom(search.value).map(stringId).filter((id): id is string => Boolean(id));
+      if (matches.length > 1) throw new Error(`Conta Azul customer lookup by ${field} returned multiple matches`);
+      matchGroups.push(matches);
+    }
+    return reconcileCustomerMatchIds(matchGroups);
   }
 
-  let customerId: string | null = reconcileCustomerMatchIds(matchGroups);
+  let customerId: string | null = await lookupCustomer(true);
+  let created = false;
   if (!customerId) {
-    const created = await contaAzulJson("/v1/pessoas", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(person),
-    }, "customer creation");
-    customerId = stringId(created.value);
-  } else {
+    try {
+      const response = await contaAzulJson("/v1/pessoas", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(person),
+      }, "customer creation");
+      customerId = stringId(response.value);
+      created = true;
+    } catch (error) {
+      const documentTaken = error instanceof ContaAzulHttpError
+        && error.status === 400
+        && /j[áa] existe uma pessoa cadastrada/i.test(error.message);
+      if (!documentTaken) throw error;
+      // O documento já pertence a alguém fora do perfil Cliente. Reaproveita
+      // esse cadastro em vez de criar um duplicado — o PATCH abaixo lhe
+      // acrescenta o perfil Cliente.
+      customerId = await lookupCustomer(false);
+      if (!customerId) throw error;
+    }
+  }
+  if (customerId && !created) {
     await contaAzulJson(`/v1/pessoas/${encodeURIComponent(customerId)}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
