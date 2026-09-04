@@ -415,17 +415,45 @@ async function saveCustomerLink(
   );
 }
 
+/**
+ * Cria ou atualiza a pessoa. Se a Conta Azul recusar com 400, tenta de novo sem
+ * o endereço: ele é acessório e não pode impedir a venda de existir.
+ */
+async function writeCustomer(
+  path: string,
+  method: "POST" | "PATCH",
+  person: JsonObject,
+  operation: string,
+): Promise<{ status: number; value: unknown }> {
+  try {
+    return await contaAzulJson(path, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(person),
+    }, operation);
+  } catch (error) {
+    if (!(error instanceof ContaAzulHttpError) || error.status !== 400 || !person.enderecos) throw error;
+    const { enderecos: _discarded, ...semEndereco } = person;
+    return await contaAzulJson(path, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(semEndereco),
+    }, `${operation} sem endereço`);
+  }
+}
+
 async function ensureCustomer(order: CommerceOrder): Promise<string> {
   const person = buildContaAzulPerson(order);
   const requestFingerprint = await fingerprint(person);
   const linked = await getCustomerLink(order);
   if (linked) {
     if (linked.request_fingerprint !== requestFingerprint) {
-      await contaAzulJson(`/v1/pessoas/${encodeURIComponent(linked.conta_azul_customer_id)}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(person),
-      }, "customer update");
+      await writeCustomer(
+        `/v1/pessoas/${encodeURIComponent(linked.conta_azul_customer_id)}`,
+        "PATCH",
+        person,
+        "customer update",
+      );
       await saveCustomerLink(order, linked.conta_azul_customer_id, requestFingerprint);
     }
     return linked.conta_azul_customer_id;
@@ -456,11 +484,7 @@ async function ensureCustomer(order: CommerceOrder): Promise<string> {
   let created = false;
   if (!customerId) {
     try {
-      const response = await contaAzulJson("/v1/pessoas", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(person),
-      }, "customer creation");
+      const response = await writeCustomer("/v1/pessoas", "POST", person, "customer creation");
       customerId = stringId(response.value);
       created = true;
     } catch (error) {
@@ -476,11 +500,7 @@ async function ensureCustomer(order: CommerceOrder): Promise<string> {
     }
   }
   if (customerId && !created) {
-    await contaAzulJson(`/v1/pessoas/${encodeURIComponent(customerId)}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(person),
-    }, "customer update");
+    await writeCustomer(`/v1/pessoas/${encodeURIComponent(customerId)}`, "PATCH", person, "customer update");
   }
   if (!customerId) throw new Error("Conta Azul customer operation returned no identifier");
   await saveCustomerLink(order, customerId, requestFingerprint);
@@ -1202,6 +1222,15 @@ Deno.serve(async (request: Request): Promise<Response> => {
             ? await refreshExistingSaleBySequence(ingestSequence, input.resettle === true)
             : await syncOrderBySequence(ingestSequence),
         );
+      } catch (error) {
+        // Operação administrativa e autenticada: devolver a causa em vez de um
+        // 503 opaco, senão não há como diagnosticar uma ordem que não sincroniza.
+        // As mensagens já saem sanitizadas de `contaAzulJson` e `databaseJson`.
+        return json({
+          error: "sync_failed",
+          ingest_sequence: ingestSequence,
+          detail: error instanceof Error ? error.message.slice(0, 800) : "unknown error",
+        }, 422);
       } finally {
         await rpc("release_integration_worker_lease", {
           p_destination: "conta_azul",

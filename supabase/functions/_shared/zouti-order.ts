@@ -561,19 +561,58 @@ export function buildContaAzulPerson(order: CommerceOrder): JsonObject {
   };
   if (type === "Física") result.cpf = customer.document;
   if (type === "Jurídica") result.cnpj = customer.document;
-  if (customer.address && Object.values(customer.address).some(Boolean)) {
-    result.enderecos = [{
-      cep: customer.address.postalCode,
-      logradouro: customer.address.street?.slice(0, 100),
-      numero: customer.address.number?.slice(0, 10),
-      complemento: customer.address.complement?.slice(0, 200),
-      bairro: customer.address.neighborhood?.slice(0, 100),
-      cidade: customer.address.city,
-      estado: customer.address.state,
-      pais: customer.address.country === "BR" ? "Brasil" : customer.address.country,
-    }];
-  }
+  const address = contaAzulAddress(customer.address);
+  if (address) result.enderecos = [address];
   return Object.fromEntries(Object.entries(result).filter(([, value]) => value !== null && value !== undefined));
+}
+
+/** Códigos ISO que aparecem nas compras; a Conta Azul quer o nome do país. */
+const COUNTRY_NAMES: Record<string, string> = {
+  BR: "Brasil",
+  AR: "Argentina",
+  CL: "Chile",
+  CO: "Colômbia",
+  ES: "Espanha",
+  JP: "Japão",
+  MX: "México",
+  PT: "Portugal",
+  PY: "Paraguai",
+  US: "Estados Unidos",
+  UY: "Uruguai",
+};
+
+/**
+ * Endereço saneado para a Conta Azul. Ela recusa o cadastro inteiro quando um
+ * campo do endereço não passa na validação — sigla de país no lugar do nome,
+ * CEP fora do formato, UF com mais de duas letras — e aí a venda para por causa
+ * de um dado acessório. Cada campo duvidoso é omitido; se nem país nem cidade
+ * sobrarem, o endereço inteiro fica de fora.
+ */
+export function contaAzulAddress(
+  address: CommerceCustomer["address"],
+): JsonObject | null {
+  if (!address || !Object.values(address).some(Boolean)) return null;
+  const rawCountry = address.country?.trim() ?? "";
+  const country = COUNTRY_NAMES[rawCountry.toUpperCase()]
+    ?? (rawCountry.length > 2 ? rawCountry : null);
+  const brazilian = country === "Brasil";
+  const digits = address.postalCode?.replace(/\D/g, "") ?? "";
+  const state = address.state?.trim() ?? "";
+  const result: JsonObject = {
+    // CEP só quando tem o formato brasileiro; endereço de fora vai sem.
+    cep: brazilian && digits.length === 8 ? digits : null,
+    logradouro: address.street?.slice(0, 100),
+    numero: address.number?.slice(0, 10),
+    complemento: address.complement?.slice(0, 200),
+    bairro: address.neighborhood?.slice(0, 100),
+    cidade: address.city?.slice(0, 100),
+    estado: brazilian && /^[A-Za-z]{2}$/.test(state) ? state.toUpperCase() : null,
+    pais: country,
+  };
+  const cleaned = Object.fromEntries(
+    Object.entries(result).filter(([, value]) => value !== null && value !== undefined && value !== ""),
+  );
+  return cleaned.pais || cleaned.cidade ? cleaned : null;
 }
 
 export function buildContaAzulProduct(item: CommerceItem, platform = "zouti"): JsonObject {

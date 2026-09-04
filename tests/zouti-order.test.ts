@@ -6,6 +6,7 @@ import {
   buildContaAzulSale,
   classifyOrderTransition,
   classifyInboundCommerceEvent,
+  contaAzulAddress,
   contaAzulMobilePhone,
   contaAzulPaymentMethod,
   contaAzulSku,
@@ -46,6 +47,77 @@ test("omits phones Conta Azul would reject instead of failing the sale", () => {
   const person = buildContaAzulPerson(foreign);
   assert.equal(person.telefone_celular, undefined);
   assert.match(String(person.observacao), /telefone informado: 351910677536/);
+});
+
+test("omits address fields Conta Azul would reject instead of losing the customer", () => {
+  // Endereço estrangeiro: sigla de país vira nome, CEP e UF de fora ficam fora.
+  assert.deepEqual(
+    contaAzulAddress({
+      postalCode: "1925",
+      street: "-",
+      number: null,
+      complement: null,
+      neighborhood: null,
+      city: "Buenos Aires",
+      state: "Buenos Aires",
+      country: "AR",
+    }),
+    { logradouro: "-", cidade: "Buenos Aires", pais: "Argentina" },
+  );
+
+  // Brasileiro completo passa inteiro, com a UF em maiúsculas.
+  assert.deepEqual(
+    contaAzulAddress({
+      postalCode: "04533-010",
+      street: "Rua Tabapuã",
+      number: "281",
+      complement: "112",
+      neighborhood: "Itaim Bibi",
+      city: "São Paulo",
+      state: "sp",
+      country: "BR",
+    }),
+    {
+      cep: "04533010",
+      logradouro: "Rua Tabapuã",
+      numero: "281",
+      complemento: "112",
+      bairro: "Itaim Bibi",
+      cidade: "São Paulo",
+      estado: "SP",
+      pais: "Brasil",
+    },
+  );
+
+  // CEP fora do formato brasileiro é descartado em vez de derrubar o cadastro.
+  const semCep = contaAzulAddress({
+    postalCode: "123",
+    street: null,
+    number: null,
+    complement: null,
+    neighborhood: null,
+    city: "Curitiba",
+    state: "PR",
+    country: "BR",
+  });
+  assert.equal(semCep?.cep, undefined);
+  assert.equal(semCep?.estado, "PR");
+
+  // País desconhecido e sem cidade não vira endereço nenhum.
+  assert.equal(
+    contaAzulAddress({
+      postalCode: null,
+      street: null,
+      number: null,
+      complement: null,
+      neighborhood: null,
+      city: null,
+      state: null,
+      country: "ZZ",
+    }),
+    null,
+  );
+  assert.equal(contaAzulAddress(null), null);
 });
 
 test("prefixes catalog SKUs by platform so links never collide", () => {
